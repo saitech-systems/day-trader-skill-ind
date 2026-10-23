@@ -1,0 +1,37 @@
+{
+ "data": [
+  {
+   "BD_DT_DATE": "15-OCT-2026",
+   "BD_DT_ORDER": "synthetic",
+   "BD_SYMBOL": "TESTMETAL",
+   "BD_SCRIP_NAME": "Test Metals Ltd (synthetic)",
+   "BD_CLIENT_NAME": "SAMPLE TRADING CO",
+   "BD_BUY_SELL": "BUY",
+   "BD_QTY_TRD": 280000,
+   "BD_TP_WATP": 409.85,
+   "BD_REMARKS": "-"
+  },
+  {
+   "BD_DT_DATE": "16-OCT-2026",
+   "BD_DT_ORDER": "synthetic",
+   "BD_SYMBOL": "DEMO",
+   "BD_SCRIP_NAME": "Demo Industries Ltd (synthetic)",
+   "BD_CLIENT_NAME": "EXAMPLE GROWTH FUND LLP",
+   "BD_BUY_SELL": "BUY",
+   "BD_QTY_TRD": 420000,
+   "BD_TP_WATP": 1351.1,
+   "BD_REMARKS": null
+  },
+  {
+   "BD_DT_DATE": "19-OCT-2026",
+   "BD_DT_ORDER": "synthetic",
+   "BD_SYMBOL": "DEMO",
+   "BD_SCRIP_NAME": "Demo Industries Ltd (synthetic)",
+   "BD_CLIENT_NAME": "EXAMPLE GROWTH FUND LLP",
+   "BD_BUY_SELL": "BUY",
+   "BD_QTY_TRD": 650000,
+   "BD_TP_WATP": 1362.15,
+   "BD_REMARKS": "-"
+  }
+ ]
+}

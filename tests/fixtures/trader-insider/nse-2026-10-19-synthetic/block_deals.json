@@ -1,0 +1,15 @@
+{
+ "data": [
+  {
+   "BD_DT_DATE": "14-OCT-2026",
+   "BD_DT_ORDER": "synthetic",
+   "BD_SYMBOL": "SAMPLEFIN",
+   "BD_SCRIP_NAME": "Sample Finance Ltd (synthetic)",
+   "BD_CLIENT_NAME": "SAMPLE HOLDINGS PRIVATE LIMITED",
+   "BD_BUY_SELL": "SELL",
+   "BD_QTY_TRD": 1000000,
+   "BD_TP_WATP": 805.0,
+   "BD_REMARKS": null
+  }
+ ]
+}
