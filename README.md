@@ -148,7 +148,7 @@ python3 trader-alerts/alerts.py add --from-plan                        # stop, t
 python3 trader-alerts/alerts.py check                                  # rings what hit, once
 python3 trader-analyst/facts.py RELIANCE                               # quarters, growth, EPS
 python3 trader-insider/insider.py pit --days 7                         # insider trades this week
-python3 trader-insider/insider.py deals                                # today's bulk and block deals
+python3 trader-insider/insider.py deals                                # the latest bulk and block deals
 ```
 
 Times are India time (IST) everywhere, and `--now "2026-10-19 10:15"` pins the
