@@ -1,18 +1,18 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "day-trader-skill",
-  "description": "The Day Trader skill pack for Claude: the Trader skill v2",
+  "name": "day-trader-skill-ind",
+  "description": "The Day Trader skill pack for Claude, India edition: NSE stocks, Zerodha Kite",
   "owner": {
-    "name": "Jake Schincariol",
-    "url": "https://opusjake.ai"
+    "name": "Saitech Systems",
+    "url": "https://github.com/saitech-systems"
   },
   "plugins": [
     {
-      "name": "day-trader-skill",
-      "description": "Eleven Claude skills for day trading: a chart scanner, a news monitor, an entry timer, an exit planner, a time machine that replays 10,000 sessions, a risk manager, a budget manager, an order executor (paper by default, never without your yes), price alerts, an earnings analyst and a Pelosi tracker.",
+      "name": "day-trader-skill-ind",
+      "description": "Eleven Claude skills for day trading NSE stocks: a Nifty 500 chart scanner, a news and exchange-filings monitor, an entry timer, an exit planner, a time machine that replays 10,000 sessions, a risk manager, a budget manager that counts Indian charges, an order executor for Zerodha Kite (paper by default, never without your yes), price alerts on the NSE clock, an earnings analyst on NSE results and an insider and bulk-deal tracker.",
       "source": "./",
       "category": "productivity",
-      "homepage": "https://github.com/Jakeschincariol/day-trader-skill"
+      "homepage": "https://github.com/saitech-systems/day-trader-skill-ind"
     }
   ]
 }
