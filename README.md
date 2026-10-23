@@ -5,7 +5,9 @@
 Free, MIT, no signup. The tools are plain Python that read free public data:
 Yahoo Finance charts for NSE stocks (`RELIANCE.NS`), NSE's index lists, company
 announcements, results, insider-trading disclosures and bulk and block deals.
-Orders go to Zerodha through its Kite MCP server, and only after your yes.
+With your own Zerodha Kite Connect API key they read live prices and candles
+from Kite instead, and your positions and order book, read only. You place the
+orders yourself in Kite, and only after your yes.
 
 One scans the Nifty 500 for setups. Another tracks the headlines and the NSE
 filings on every stock you watch. One watches a setup bar by bar and tells you
@@ -58,9 +60,39 @@ Project-local instead of global: copy the same folders into your repo's
 top of a chat and it runs as a mode. You lose the Python tools, but the method
 works.
 
-The tools need Python 3.8 or newer. Nothing to pip install, no API key for the
-data. Placing real orders needs a Zerodha account and the Kite MCP server: see
-`/trader-broker`.
+The tools need Python 3.8 or newer. Nothing to pip install, no API key needed
+for the free data. A Zerodha Kite Connect key gives you live Kite data: see
+below.
+
+## Your Zerodha Kite Connect API (optional, read only)
+
+If you have a Kite Connect app on the Connect plan (the one with market data),
+the tools use it for live quotes and candles instead of Yahoo, and
+`/trader-broker` reads your positions, margins and order book from it. The
+pack never places an order through the API: you place each order yourself in
+Kite after the pack's checks and your yes, and the pack reads it back.
+
+1. On [developers.kite.trade](https://developers.kite.trade), create an app on
+   the Connect plan. The redirect URL can be `http://127.0.0.1`.
+2. Put the app's key and secret in your shell profile (or your Claude Desktop /
+   Claude Code environment), never in the chat and never in a repo:
+   `export KITE_API_KEY=...` and `export KITE_API_SECRET=...`.
+3. Once a day (Zerodha ends every session at 6:00 AM IST), log in:
+
+   ```bash
+   python3 trader-broker/kite.py login        # prints the Kite login link
+   python3 trader-broker/kite.py session --url "PASTE THE ADDRESS KITE SENT YOU TO"
+   ```
+
+   Run these yourself (in Claude Code, start the line with `!`). The address
+   carries a one-time request token; the session is saved to
+   `trader/state/kite-session.json`, so keep `trader/` out of git.
+4. That is it. Every data command picks Kite when today's session is saved
+   (`"data_source": "auto"` in the config) and says so; `--source yahoo` or
+   `--source kite` forces one. No session means free Yahoo data, with a note.
+
+Read-only use needs no static IP; that SEBI rule is for orders sent through
+the API, which this pack does not do.
 
 ## The eleven
 
@@ -73,7 +105,7 @@ data. Placing real orders needs a Zerodha account and the Kite MCP server: see
 | `/trader-timemachine` | Time Machine | Replays every possible outcome of a trade before you risk a rupee: 10,000 simulated sessions plus every past time the setup fired. |
 | `/trader-risk` | Risk Manager | Checks every order against your limits and stops anything over them. |
 | `/trader-budget` | Budget Manager | Sizes every position to your budget and your max loss per trade, charges included. |
-| `/trader-broker` | Order Executor | Sends approved orders to Zerodha through Kite, paper trading by default, never without your yes. |
+| `/trader-broker` | Order Executor | Turns each approved order into a ticket you place yourself in Kite, then reads it back from Kite; paper trading by default, never without your yes. |
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop, your flat-by time or the 9:15 opening bell hits. |
 | `/trader-analyst` | Earnings Analyst | Reads the quarterly results a company filed with the NSE and sums up what changed. |
 | `/trader-insider` | Insider Tracker | Reads SEBI insider-trading disclosures (promoters, directors) and NSE bulk and block deals as they post. |
@@ -119,9 +151,11 @@ An example, end to end. It runs on the **synthetic test data** in
    the daily loss limit, trades per day, reward to risk, the entry window, the
    tick, position size and cash. PASS or BLOCK, with the reason.
 8. **`/trader-broker`** shows you the ticket in plain words. You type yes for
-   that exact order. On paper (the default) nothing goes to Zerodha. Live,
-   Claude calls Kite's `place_order` for the entry, then for the stop-loss once
-   the entry fills, and Claude's own "Allow once / Deny" card asks you each time.
+   that exact order. On paper (the default) nothing goes to Zerodha. Live, you
+   place that exact order yourself in Kite, then the stop-loss once the entry
+   fills; `kite.py orders` reads your order book back and `ticket.py match`
+   records what Zerodha did. (If you prefer Claude to place it, the Kite MCP
+   route is in `/trader-broker`, behind Claude's "Allow once / Deny" card.)
 9. **`/trader-alerts`** rings on the stop, the target and at 15:05 to get out
    of whatever is still open, well before Zerodha's own auto square-off.
 
@@ -147,6 +181,9 @@ python3 trader-alerts/alerts.py clock                                  # NSE ope
 python3 trader-alerts/alerts.py add --from-plan                        # stop, target, flat by 15:05
 python3 trader-alerts/alerts.py check                                  # rings what hit, once
 python3 trader-analyst/facts.py RELIANCE                               # quarters, growth, EPS
+python3 trader-broker/kite.py status                                   # your Kite session, read only
+python3 trader-broker/kite.py orders --write                           # your Kite order book, for ticket.py match
+python3 trader-broker/kite.py sync --write                             # positions and cash -> trader/portfolio.json
 python3 trader-insider/insider.py pit --days 7                         # insider trades this week
 python3 trader-insider/insider.py deals                                # the latest bulk and block deals
 ```
@@ -190,12 +227,13 @@ own "Allow once / Deny" card is a second check. No F&O, options, MTF or margin,
 short selling or leverage unless you turn them on.
 
 **Paper first.** `"paper": true` is the default in `config.example.json`, and
-on paper no Kite order tool is called at all: the pack keeps its own simulated
-ledger. Zerodha's hosted Kite MCP server is read only (prices, positions,
-orders). Placing orders through Claude needs the self-hosted server with your
-own Kite Connect app, and under SEBI's retail-algo rules Zerodha only accepts
-API orders from the static IP registered on that app. Keys live in your Claude
-Desktop config or environment variables, never in the chat.
+on paper nothing goes to Zerodha: the pack keeps its own simulated ledger.
+Live, you place every order yourself in Kite (`"order_route": "manual"`). Your
+Kite Connect key is used read only. If you want Claude to place orders, that
+needs Zerodha's self-hosted Kite MCP server (the hosted one is read only), and
+under SEBI's retail-algo rules Zerodha only accepts API orders from the static
+IP registered on your Kite Connect app. Keys live in environment variables or
+your Claude Desktop config, never in the chat.
 
 **Intraday on the NSE.** The normal market runs 9:15 AM to 3:30 PM IST. From
 3 August to 6 December 2026, F&O stocks stop continuous trading at 3:15 PM for
@@ -218,10 +256,13 @@ odds as a reality check, never as a promise.
 trigger in a fast market or a gap, and a stop-limit order may not fill at all
 if the price jumps past its limit. The max loss shown is the loss at the stop.
 
-**The data is free and unofficial.** Yahoo Finance's chart endpoint is not an
-official API: it can lag, change or rate-limit you. The NSE website blocks
-many scripts; when it refuses, the tools say so and name the page to open in
-your browser. Check anything that matters against Kite before you act on it.
+**Know your data source.** Without a Kite session the data is free and
+unofficial: Yahoo Finance's chart endpoint is not an official API, it can lag,
+change or rate-limit you. Kite's data is Zerodha's own and live, but the tools
+still read 1-minute or 5-minute candles, not every tick. The NSE website
+blocks many scripts; when it refuses, the tools say so and name the page to
+open in your browser. Every output says which source it used. Check anything
+that matters in Kite before you act on it.
 
 **Insider trades are public, not inside information.** Insiders must disclose
 their trades to the company within two trading days, and the company to the
@@ -242,7 +283,7 @@ trader-exit/        SKILL.md, exit.py
 trader-timemachine/ SKILL.md, timemachine.py
 trader-risk/        SKILL.md, check.py
 trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
-trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
+trader-broker/      SKILL.md, ticket.py, kite.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json
 trader-insider/     SKILL.md, insider.py

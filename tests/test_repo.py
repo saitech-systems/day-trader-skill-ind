@@ -220,6 +220,68 @@ class Repo(unittest.TestCase):
                 self.assertRegex(m.group(1).lower(), r"your|here|never", os.path.relpath(path, ROOT))
 
 
+def kite_block(src):
+    """The Kite Connect client a tool carries, from KITE_API to the end of
+    pick_source, with the tool's own exception name taken out."""
+    m = re.search(r'(?ms)^KITE_API = "https://api\.kite\.trade"\n(.*?^def pick_source\(.*?)(?=^\S|\Z)', src)
+    if not m:
+        return None
+    body = m.group(1)
+    exc = re.search(r"(?m)^class (\w+)\(Exception\)", src)
+    if exc:
+        body = re.sub(r"\b%s\b" % exc.group(1), "ToolError", body)
+    return "\n".join(line.rstrip() for line in body.strip().splitlines())
+
+
+class Kite(unittest.TestCase):
+    """The user's own Kite Connect key is read only: market data and their account."""
+
+    TOOLS = ["trader-entry/entry.py", "trader-exit/exit.py", "trader-timemachine/timemachine.py",
+             "trader-scanner/scan.py", "trader-alerts/alerts.py", "trader-news/news.py", "trader-broker/kite.py"]
+
+    def test_every_data_tool_carries_the_same_kite_client(self):
+        blocks = {}
+        for rel in self.TOOLS:
+            with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+                blocks[rel] = kite_block(fh.read())
+            self.assertIsNotNone(blocks[rel], "%s has no Kite block" % rel)
+        first = blocks[self.TOOLS[0]]
+        for rel, body in blocks.items():
+            self.assertEqual(body, first, "%s's Kite block differs from %s's" % (rel, self.TOOLS[0]))
+
+    def test_nothing_can_place_an_order_through_the_api(self):
+        # Kite's order-writing endpoints are /orders/<variety>, /gtt/triggers and the like
+        for s, f, path in skill_files():
+            if not f.endswith(".py"):
+                continue
+            with open(path, encoding="utf-8") as fh:
+                src = fh.read()
+            rel = "%s/%s" % (s, f)
+            for bad in ("/orders/regular", "/orders/amo", "/orders/co", "/orders/iceberg", "/gtt/triggers",
+                        "/portfolio/positions/convert", "/alerts"):
+                self.assertNotIn(bad, src, rel)
+            if "api.kite.trade" not in src:
+                continue
+            if rel == "trader-broker/kite.py":
+                # the one write in the pack: exchanging the daily login for a session
+                self.assertIn("/session/token", src)
+                self.assertEqual(len(re.findall(r"\bdata=", src)), 1, "kite.py sends a body more than once")
+            else:
+                self.assertNotIn("/session/token", src, rel)
+                self.assertNotRegex(src, r"(?s)Request\([^)]*\bdata=", rel)
+                self.assertNotIn('"POST"', src, rel)
+
+    def test_the_credentials_come_from_the_environment(self):
+        with open(os.path.join(ROOT, "trader-broker", "kite.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("KITE_API_SECRET", src)
+        self.assertIn("os.environ", src)
+        with open(os.path.join(ROOT, "trader-budget", "config.example.json")) as fh:
+            cfg = json.load(fh)
+        self.assertEqual((cfg["data_source"], cfg["order_route"]), ("auto", "manual"))
+        self.assertFalse([k for k in cfg if "kite" in k.lower() or "secret" in k.lower() or "token" in k.lower()])
+
+
 class Synthetic(unittest.TestCase):
     """The shared fixtures are synthetic and must be exactly what the generator makes."""
 

@@ -48,14 +48,17 @@ no daylight saving).
 """
 
 import argparse
+import csv
 import datetime
 import gzip
+import io
 import json
 import os
 import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -323,6 +326,231 @@ def market_status(now_utc):
         if ns:
             st["next_open_session"] = ns[2]
     return st
+
+
+# BEGIN KITE BLOCK
+# ---------------------------------------------------------------- Kite Connect, read only (market data, account)
+#
+# Your own Kite Connect app (developers.kite.trade; the Connect plan carries the
+# market data). trader-broker/kite.py logs in once a day and saves the session to
+# trader/state/kite-session.json; every tool reads it from there. Zerodha ends
+# every session at 6:00 AM IST. KITE_API_KEY + KITE_ACCESS_TOKEN in the
+# environment win over the file. This block only ever GETs: no orders.
+
+KITE_API = "https://api.kite.trade"
+KITE_SESSION = "trader/state/kite-session.json"
+KITE_INSTRUMENTS = "trader/state/kite-instruments-NSE.json"
+KITE_INTERVALS = {"1m": "minute", "5m": "5minute", "1d": "day"}
+KITE_PAUSE = 0.35           # historical candles: Kite allows 3 requests a second
+KITE_QUOTE_PAUSE = 1.0      # quotes: 1 request a second, up to 500 symbols each
+KITE_SOURCES = ("auto", "kite", "yahoo")
+
+
+def kite_urlopen(req, timeout=20):
+    """The one network call of the block (tests replace it)."""
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def kite_expiry(login_utc):
+    """Kite sessions end at 6:00 AM IST after the login: naive UTC."""
+    local = to_ist(login_utc)
+    six = datetime.datetime.combine(local.date(), datetime.time(6, 0))
+    if local >= six:
+        six += datetime.timedelta(days=1)
+    return ist_to_utc(six)
+
+
+def kite_session(path=KITE_SESSION, now_utc=None):
+    """The saved session while it is valid, else None. Never prints the token."""
+    key, token = os.environ.get("KITE_API_KEY"), os.environ.get("KITE_ACCESS_TOKEN")
+    if key and token:
+        return {"api_key": key, "access_token": token, "source": "environment"}
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        login = datetime.datetime.strptime(doc["login_utc"], "%Y-%m-%dT%H:%M:%SZ")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not doc.get("api_key") or not doc.get("access_token"):
+        return None
+    if (now_utc or utc_now()) >= kite_expiry(login):
+        return None
+    return dict(doc, source=path)
+
+
+def kite_request(sess, path, params=None, timeout=20):
+    """GET one Kite path: the raw body text. Plain-words AlertError on failure."""
+    query = urllib.parse.urlencode(params or [], doseq=True)
+    url = KITE_API + path + ("?" + query if query else "")
+    req = urllib.request.Request(url, headers={
+        "X-Kite-Version": "3", "User-Agent": UA,
+        "Authorization": "token %s:%s" % (sess["api_key"], sess["access_token"])})
+    try:
+        with kite_urlopen(req, timeout) as r:
+            return r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            doc = json.loads(e.read().decode("utf-8", "replace"))
+            why = "%s: %s" % (doc.get("error_type") or "error", doc.get("message") or "")
+        except Exception:
+            why = "HTTP %d" % e.code
+        finally:
+            e.close()
+        if e.code in (401, 403):
+            raise AlertError("Kite refused the session (%s). Log in again: python3 trader-broker/kite.py login" % why)
+        if e.code == 429:
+            raise AlertError("Kite says too many requests (%s): wait a few seconds and try again" % why)
+        raise AlertError("Kite answered HTTP %d for %s (%s)" % (e.code, path, why))
+    except urllib.error.URLError as e:
+        raise AlertError("could not reach Kite (%s): check the connection" % (e.reason,))
+    except OSError as e:
+        raise AlertError("could not reach Kite: %s" % (e,))
+
+
+def kite_get(sess, path, params=None):
+    """GET a Kite JSON path: its "data"."""
+    text = kite_request(sess, path, params)
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        raise AlertError("Kite sent something that is not JSON for %s" % path)
+    if doc.get("status") != "success":
+        raise AlertError("Kite said %s for %s: %s" % (doc.get("error_type") or "error", path, doc.get("message")))
+    return doc.get("data")
+
+
+def kite_instruments(sess, path=KITE_INSTRUMENTS, now_utc=None):
+    """{SYMBOL: {"token", "tick", "name", "lot"}} for NSE equities, from Kite's
+    instrument dump, cached for the day (Kite rebuilds it every morning)."""
+    today = to_ist(now_utc or utc_now()).date().isoformat()
+    if path and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+            if doc.get("date") == today and doc.get("rows"):
+                return doc["rows"]
+        except (OSError, ValueError, AttributeError):
+            pass
+    text = kite_request(sess, "/instruments/NSE")
+    rows = {}
+    for r in csv.DictReader(io.StringIO(text)):
+        if r.get("segment") != "NSE" or r.get("instrument_type") != "EQ":
+            continue
+        try:
+            rows[r["tradingsymbol"].strip().upper()] = {
+                "token": int(r["instrument_token"]), "tick": float(r.get("tick_size") or 0.05),
+                "name": (r.get("name") or "").strip(), "lot": int(float(r.get("lot_size") or 1))}
+        except (KeyError, ValueError):
+            continue
+    if not rows:
+        raise AlertError("Kite's NSE instrument list came back empty")
+    if path:
+        try:
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"date": today, "rows": rows}, fh)
+        except OSError:
+            pass
+    return rows
+
+
+def kite_ts(text):
+    """"2026-10-19T09:15:00+0530" -> Unix seconds."""
+    dt = datetime.datetime.strptime(str(text).strip(), "%Y-%m-%dT%H:%M:%S%z")
+    return int((dt - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)).total_seconds())
+
+
+def kite_quotes(sess, symbols, pause=KITE_QUOTE_PAUSE):
+    """{SYM: {"price", "prev_close", "time" (naive UTC or None), "volume"}}, 500 a call."""
+    syms = [nse_symbol(s) for s in symbols]
+    out = {}
+    for i in range(0, len(syms), 500):
+        if i:
+            time.sleep(pause)
+        batch = syms[i:i + 500]
+        data = kite_get(sess, "/quote", [("i", "NSE:" + s) for s in batch]) or {}
+        for s in batch:
+            d = data.get("NSE:" + s)
+            if not d or d.get("last_price") is None:
+                continue
+            stamp = d.get("last_trade_time") or d.get("timestamp")
+            when = None
+            if stamp:
+                try:
+                    when = ist_to_utc(datetime.datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S"))
+                except ValueError:
+                    when = None
+            out[s] = {"price": float(d["last_price"]), "prev_close": (d.get("ohlc") or {}).get("close"),
+                      "time": when, "volume": d.get("volume")}
+    return out
+
+
+def kite_chart(sess, sym, interval, start_day, end_day, now_utc=None, with_quote=True):
+    """Kite candles for one NSE stock from start_day to end_day (dates, IST),
+    returned as Yahoo chart JSON v8 text: the tool then reads it exactly like a
+    Yahoo answer. A forming candle comes back too; the tool's own closed-bar
+    rule decides when it counts. with_quote adds the previous close and the
+    last price from Kite's quote."""
+    sym = nse_symbol(sym)
+    if interval not in KITE_INTERVALS:
+        raise AlertError("Kite candles here are 1m, 5m or 1d, not %r" % interval)
+    inst = kite_instruments(sess, now_utc=now_utc).get(sym)
+    if not inst:
+        raise AlertError("Kite has no NSE equity called %s" % sym)
+    data = kite_get(sess, "/instruments/historical/%d/%s" % (inst["token"], KITE_INTERVALS[interval]),
+                    [("from", "%s 09:00:00" % start_day), ("to", "%s 16:00:00" % end_day)]) or {}
+    q = {"open": [], "high": [], "low": [], "close": [], "volume": []}
+    stamps = []
+    for row in data.get("candles") or []:
+        try:
+            t = kite_ts(row[0])
+            o, h, lo, c = (float(x) for x in row[1:5])
+        except (ValueError, TypeError, IndexError):
+            continue
+        stamps.append(t)
+        for k, v in zip(("open", "high", "low", "close"), (o, h, lo, c)):
+            q[k].append(v)
+        q["volume"].append(int(row[5]) if len(row) > 5 and row[5] is not None else 0)
+    now_ts = ts_of(now_utc or utc_now())
+    step = {"1m": 60, "5m": 300, "1d": 86400}[interval]
+    last_end = (stamps[-1] + step) if stamps else now_ts
+    meta = {"symbol": yahoo_symbol(sym), "currency": "INR", "exchangeName": "NSI", "fullExchangeName": "NSE",
+            "instrumentType": "EQUITY", "dataGranularity": interval, "gmtoffset": 19800, "timezone": "IST",
+            "exchangeTimezoneName": "Asia/Kolkata", "regularMarketTime": min(now_ts, last_end),
+            "longName": inst["name"], "tickSize": inst["tick"], "source": "kite"}
+    if stamps:
+        meta["regularMarketPrice"] = q["close"][-1]
+    if with_quote:
+        time.sleep(KITE_PAUSE)
+        quote = kite_quotes(sess, [sym]).get(sym) or {}
+        if quote.get("prev_close"):
+            meta["previousClose"] = meta["chartPreviousClose"] = float(quote["prev_close"])
+        if quote.get("price") is not None:
+            meta["regularMarketPrice"] = quote["price"]
+    return json.dumps({"chart": {"result": [{"meta": meta, "timestamp": stamps, "indicators": {"quote": [q]}}],
+                                 "error": None}})
+
+
+def pick_source(choice=None, cfg=None, now_utc=None, path=KITE_SESSION):
+    """(source, session, note). --source wins, then "data_source" in the config.
+    "auto" (the default) is Kite when a session from today is saved, else Yahoo."""
+    want = str(choice or (cfg or {}).get("data_source") or "auto").strip().lower()
+    if want not in KITE_SOURCES:
+        raise AlertError("data source is auto, kite or yahoo, not %r" % want)
+    if want == "yahoo":
+        return "yahoo", None, ""
+    sess = kite_session(path, now_utc)
+    if sess:
+        return "kite", sess, ""
+    if want == "kite":
+        raise AlertError("no Kite session for today: log in first (python3 trader-broker/kite.py login), "
+                        "or use --source yahoo")
+    return "yahoo", None, "no Kite session today, so free Yahoo data (log in with trader-broker/kite.py for live Kite data)"
+# END KITE BLOCK
 
 
 # ---------------------------------------------------------------- quotes
