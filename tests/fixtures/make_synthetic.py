@@ -14,6 +14,9 @@ same files, on any machine.
                                        ends with the in-progress 10:45 bar and a
                                        live tick at 10:49:45.
   shared/DEMO-2026-10-19-5m-synthetic.json   the same Monday only, as range=1d.
+  shared/kite/                         the same bars as Kite Connect answers them:
+                                       the NSE instrument list, historical
+                                       5-minute candles and a quote at 10:49:45.
 
 Monday 2026-10-19 is written by hand so the story is easy to follow: the
 opening range (9:15, 9:20, 9:25 bars) is 1351.30 to 1363.80; the 9:35 bar
@@ -188,6 +191,58 @@ def write(path, doc):
             fh.write(text + "\n")
 
 
+KITE_TOKENS = {"DEMO": 9000001, "TESTCO": 9000002, "SAMPLE": 9000003}
+KITE_INSTRUMENT_ROWS = [  # Kite's /instruments/NSE columns, made-up tokens
+    ("9000001", "35157", "DEMO", "DEMO INDUSTRIES (SYNTHETIC)", "0", "", "0", "0.1", "1", "EQ", "NSE", "NSE"),
+    ("9000002", "35158", "TESTCO", "TEST COMPANY (SYNTHETIC)", "0", "", "0", "0.01", "1", "EQ", "NSE", "NSE"),
+    ("9000003", "35159", "SAMPLE", "SAMPLE LIMITED (SYNTHETIC)", "0", "", "0", "0.05", "1", "EQ", "NSE", "NSE"),
+    ("9000004", "35160", "DEMO-BE", "DEMO INDUSTRIES BE (SYNTHETIC)", "0", "", "0", "0.1", "1", "BE", "NSE", "NSE"),
+    ("256265", "1001", "NIFTY 50", "NIFTY 50", "0", "", "0", "0", "0", "EQ", "INDICES", "NSE"),
+]
+
+
+def kite_stamp(t):
+    """Unix seconds -> Kite's candle time, "2026-10-19T09:15:00+0530"."""
+    return (EPOCH + datetime.timedelta(seconds=t) + IST).strftime("%Y-%m-%dT%H:%M:%S+0530")
+
+
+def kite_candles(bars):
+    """[(ts, o, h, l, c, v)] -> a Kite historical-data answer. Kite has no live
+    tick off the bar grid, so a bar that is not on the 5-minute grid is left out."""
+    rows = [[kite_stamp(t), o, h, lo, c, v] for t, o, h, lo, c, v in bars if t % 300 == 0]
+    return {"status": "success", "data": {"candles": rows}}
+
+
+def kite_quote(symbol, token, last, prev_close, day_bars, at_ist):
+    """A Kite /quote answer for one NSE symbol at at_ist."""
+    stamp = at_ist.strftime("%Y-%m-%d %H:%M:%S")
+    return {"status": "success", "data": {"NSE:" + symbol: {
+        "instrument_token": token, "timestamp": stamp, "last_trade_time": stamp, "last_price": last,
+        "last_quantity": 5, "buy_quantity": 182300, "sell_quantity": 164900,
+        "volume": sum(b[5] for b in day_bars), "average_price": 1364.21, "oi": 0, "oi_day_high": 0,
+        "oi_day_low": 0, "net_change": round(last - prev_close, 2), "lower_circuit_limit": 1217.2,
+        "upper_circuit_limit": 1487.6,
+        "ohlc": {"open": day_bars[0][1], "high": max(b[2] for b in day_bars),
+                 "low": min(b[3] for b in day_bars), "close": prev_close}}}}
+
+
+def write_kite(hist, monday):
+    kdir = os.path.join(OUT, "kite")
+    head = ("instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,"
+            "instrument_type,segment,exchange")
+    os.makedirs(kdir, exist_ok=True)
+    with open(os.path.join(kdir, "instruments-NSE-synthetic.csv"), "w", encoding="utf-8", newline="") as fh:
+        fh.write(head + "\n" + "\n".join(",".join(r) for r in KITE_INSTRUMENT_ROWS) + "\n")
+    bars = [b for sess in hist for b in sess] + monday
+    write(os.path.join(kdir, "historical-DEMO-5minute-synthetic.json.gz"), kite_candles(bars))
+    on_grid = [b for b in monday if b[0] % 300 == 0]
+    write(os.path.join(kdir, "quote-DEMO-synthetic.json"),
+          kite_quote("DEMO", KITE_TOKENS["DEMO"], LIVE_TICK, PREV_CLOSE, on_grid, FETCHED))
+    write(os.path.join(kdir, "error-token-synthetic.json"),
+          {"status": "error", "message": "Incorrect `api_key` or `access_token`.", "data": None,
+           "error_type": "TokenException"})
+
+
 def main():
     days, hist, monday = demo_history()
     bars = [b for sess in hist for b in sess] + monday
@@ -196,6 +251,7 @@ def main():
           chart_doc("DEMO", bars, FETCHED, "60d", PREV_CLOSE, chart_prev_close=first_close))
     write(os.path.join(OUT, "DEMO-2026-10-19-5m-synthetic.json"),
           chart_doc("DEMO", monday, FETCHED, "1d", PREV_CLOSE))
+    write_kite(hist, monday)
     print("wrote %d sessions (%s to %s) to %s" % (len(days), days[0], days[-1], OUT))
 
 

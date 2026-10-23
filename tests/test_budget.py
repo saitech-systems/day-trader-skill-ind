@@ -34,7 +34,8 @@ CONTRACT_CFG = {
     "stop_order_type": "SL", "stop_buffer_pct": 0.25, "exit_buffer_pct": 0.5,
     "charges": {"brokerage_pct": 0.03, "brokerage_max_inr": 20, "stt_sell_pct": 0.025,
                 "exchange_txn_pct": 0.00297, "sebi_per_crore_inr": 10, "stamp_buy_pct": 0.003, "gst_pct": 18},
-    "fractional": False, "broker": "zerodha", "paper": True, "blocked": [],
+    "fractional": False, "broker": "zerodha", "paper": True, "order_route": "manual",
+    "data_source": "auto", "blocked": [],
     "allow_options": False, "allow_margin": False, "allow_short": False,
 }
 # a long-term split's rules, for the weights mode tests

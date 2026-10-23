@@ -32,6 +32,8 @@
   "fractional": false,
   "broker": "zerodha",
   "paper": true,
+  "order_route": "manual",
+  "data_source": "auto",
   "blocked": [],
   "allow_options": false,
   "allow_margin": false,
