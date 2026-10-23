@@ -516,7 +516,7 @@ def kite_format(o, c, label=""):
         reasons.append("format: %sno product (MIS for an intraday trade)" % pre)
     elif product not in PRODUCTS:
         reasons.append("format: %sunknown product %r" % (pre, o.get("product")))
-    elif product == "NRML":
+    elif product == "NRML" and exch not in ("NFO", "BFO"):
         reasons.append("format: %sproduct NRML is for futures and options; an NSE day trade here is MIS" % pre)
     elif product == "MTF":
         if not c.get("allow_margin"):

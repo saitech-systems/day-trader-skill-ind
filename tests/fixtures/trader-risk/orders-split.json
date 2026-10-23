@@ -1,0 +1,62 @@
+{
+  "created_by": "trader-budget",
+  "status": "proposed",
+  "note": "A long-term split from targets.example.json with MADE-UP prices (test data, not quotes).",
+  "orders": [
+    {
+      "variety": "regular",
+      "exchange": "NSE",
+      "tradingsymbol": "RELIANCE",
+      "transaction_type": "BUY",
+      "quantity": 17,
+      "product": "CNC",
+      "order_type": "LIMIT",
+      "price": 1412.4,
+      "validity": "DAY"
+    },
+    {
+      "variety": "regular",
+      "exchange": "NSE",
+      "tradingsymbol": "HDFCBANK",
+      "transaction_type": "BUY",
+      "quantity": 23,
+      "product": "CNC",
+      "order_type": "LIMIT",
+      "price": 987.6,
+      "validity": "DAY"
+    },
+    {
+      "variety": "regular",
+      "exchange": "NSE",
+      "tradingsymbol": "INFY",
+      "transaction_type": "BUY",
+      "quantity": 12,
+      "product": "CNC",
+      "order_type": "LIMIT",
+      "price": 1503.2,
+      "validity": "DAY"
+    },
+    {
+      "variety": "regular",
+      "exchange": "NSE",
+      "tradingsymbol": "TCS",
+      "transaction_type": "BUY",
+      "quantity": 5,
+      "product": "CNC",
+      "order_type": "LIMIT",
+      "price": 3120.0,
+      "validity": "DAY"
+    },
+    {
+      "variety": "regular",
+      "exchange": "NSE",
+      "tradingsymbol": "ITC",
+      "transaction_type": "BUY",
+      "quantity": 23,
+      "product": "CNC",
+      "order_type": "LIMIT",
+      "price": 412.55,
+      "validity": "DAY"
+    }
+  ]
+}
