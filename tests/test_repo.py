@@ -121,7 +121,7 @@ class Repo(unittest.TestCase):
                 text = fh.read()
             rel = os.path.relpath(path, ROOT)
             if not rel.startswith(os.path.join("tests", "fixtures") + os.sep) or rel.endswith(".py"):
-                self.assertNotIn("—", text, rel)  # fixtures may carry real data later, kept as published
+                self.assertNotIn("\u2014", text, rel)  # fixtures may carry real data later, kept as published
             self.assertNotIn("jakeschincariol" + "@" + "gmail.com", text, rel)  # built, so this file passes too
 
     def test_no_v1_only_skill_is_left_behind(self):

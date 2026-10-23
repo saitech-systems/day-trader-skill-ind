@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<rss version="2.0">
+    <channel>
+        <copyright>Synthetic test data, not Yahoo content.</copyright>
+        <description>Latest Financial News for SAMPLE.NS</description>
+        <language>en-IN</language>
+        <lastBuildDate>Mon, 19 Oct 2026 05:30:00 +0000</lastBuildDate>
+        <link>https://finance.yahoo.com/quote/SAMPLE.NS</link>
+        <title>Yahoo! Finance: SAMPLE.NS News</title>
+        <item>
+            <description>The regulator questioned related-party disclosures.</description>
+            <guid isPermaLink="false">sample-0004</guid>
+            <link>https://finance.yahoo.com/news/sebi-issues-a-show-cause-notice-to-a-sample-0004.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 04:40:00 +0000</pubDate>
+            <title>SEBI issues a show-cause notice to a Sample Motors promoter entity</title>
+        </item>
+        <item>
+            <description>The recall covers models sold since March.</description>
+            <guid isPermaLink="false">sample-0003</guid>
+            <link>https://finance.yahoo.com/news/sample-motors-recalls-12-000-scooters-over-a-sample-0003.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 04:10:00 +0000</pubDate>
+            <title>Sample Motors recalls 12,000 scooters over a brake fault</title>
+        </item>
+        <item>
+            <description>Banks and autos led the early gains on the NSE.</description>
+            <guid isPermaLink="false">mkt-0006</guid>
+            <link>https://finance.yahoo.com/news/stock-market-today-nifty-opens-higher-demo-industries-mkt-0006.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 03:50:00 +0000</pubDate>
+            <title>Stock market today: Nifty opens higher; Demo Industries, Sample Motors among top gainers</title>
+        </item>
+        <item>
+            <description>Analysts expect scooter volumes to lead.</description>
+            <guid isPermaLink="false">sample-0001</guid>
+            <link>https://finance.yahoo.com/news/sample-motors-october-sales-preview-brokerages-expect-8-sample-0001.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 02:45:00 +0000</pubDate>
+            <title>Sample Motors October sales preview: brokerages expect 8% growth</title>
+        </item>
+    </channel>
+</rss>

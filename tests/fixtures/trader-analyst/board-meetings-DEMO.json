@@ -1,0 +1,41 @@
+[
+  {
+    "bm_symbol": "DEMO",
+    "bm_date": "22-Oct-2026",
+    "bm_purpose": "Demo Industries Limited has informed the Exchange about Board Meeting to be held on 22-Oct-2026 to consider and approve the Unaudited Financial Results for the quarter ended September 30, 2026.",
+    "bm_desc": "Board Meeting Intimation",
+    "sm_indusrty": "Auto Components",
+    "bm_timestamp": "16-Oct-2026 17:45:03",
+    "sm_name": "Demo Industries Limited",
+    "sm_isin": "INE000D01019",
+    "attachment": "https://nsearchives.nseindia.com/corporate/xbrl/PRIOR_INTIMATION_950377_SYNTHETIC.xml",
+    "diff": "00:00:41",
+    "sysTime": "16-Oct-2026 17:45:03"
+  },
+  {
+    "bm_symbol": "DEMO",
+    "bm_date": "05-Sep-2026",
+    "bm_purpose": "Demo Industries Limited has informed the Exchange about Board Meeting to be held on 05-Sep-2026 to consider raising of funds through non-convertible debentures.",
+    "bm_desc": "Board Meeting Intimation",
+    "sm_indusrty": "Auto Components",
+    "bm_timestamp": "29-Aug-2026 16:02:44",
+    "sm_name": "Demo Industries Limited",
+    "sm_isin": "INE000D01019",
+    "attachment": "https://nsearchives.nseindia.com/corporate/xbrl/PRIOR_INTIMATION_940211_SYNTHETIC.xml",
+    "diff": "00:00:41",
+    "sysTime": "29-Aug-2026 16:02:44"
+  },
+  {
+    "bm_symbol": "DEMO",
+    "bm_date": "23-Jul-2026",
+    "bm_purpose": "Demo Industries Limited has informed the Exchange about Board Meeting to be held on 23-Jul-2026 to consider and approve the Unaudited Financial Results for the quarter ended June 30, 2026.",
+    "bm_desc": "Board Meeting Intimation",
+    "sm_indusrty": "Auto Components",
+    "bm_timestamp": "14-Jul-2026 18:10:27",
+    "sm_name": "Demo Industries Limited",
+    "sm_isin": "INE000D01019",
+    "attachment": "https://nsearchives.nseindia.com/corporate/xbrl/PRIOR_INTIMATION_930118_SYNTHETIC.xml",
+    "diff": "00:00:41",
+    "sysTime": "14-Jul-2026 18:10:27"
+  }
+]
