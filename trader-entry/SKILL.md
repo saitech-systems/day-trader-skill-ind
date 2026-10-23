@@ -52,8 +52,22 @@ waiting.
 | --- | --- |
 | `trader/watchlist.json` | the scanner's hits (`hits[].symbol`), for `watchlist` |
 | `trader/config.json` | `no_entries_before` (09:30) and `no_entries_after` (14:45), India time. Optional |
-| Yahoo chart API | today's bars for `SYMBOL.NS`, `range=1d&interval=5m` (or `1m`): free, unofficial, can lag |
+| Kite Connect (read only) | today's candles from your own Kite app after the daily login: live and official |
+| Yahoo chart API | otherwise, today's bars for `SYMBOL.NS`, `range=1d&interval=5m` (or `1m`): free, unofficial, can lag |
 | `trader/entry.json` | with `check --write`, or when `watch` triggers: symbol, exchange, setup, status, time, bar, price, level, opening range |
+
+## Data source
+
+`--source auto` (the default, or `"data_source"` in `trader/config.json`)
+reads today's candles from the user's own Kite Connect app when they have logged in today
+(`python3 trader-broker/kite.py login`, then `kite.py session`; Zerodha ends
+every session at 6:00 AM), and from free Yahoo bars otherwise, saying so once.
+`--source kite` insists on Kite, `--source yahoo` skips it, `--offline` wins
+over both. Kite is read only here: it never places anything. The header says
+which source it used ("Kite, live" or "Yahoo, free, can lag"). The API key,
+secret and access token stay in the environment and in
+`trader/state/kite-session.json`: never ask for them, never print them, never
+paste them in the chat.
 
 ## The rule
 

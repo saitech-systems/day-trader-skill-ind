@@ -1337,7 +1337,7 @@ def compute(a):
     if a.offline:
         text, source = read_offline(a.offline, plan["symbol"]), "offline"
     else:
-        source, sess, note = pick_source(a.source, read_config(a.config), now)
+        source, sess, note = pick_source(a.source, read_config(a.config))   # the real clock: today's login
         if sess:
             text = fetch_kite(sess, plan["symbol"], datetime.date.fromisoformat(plan["date"]), now)
         else:

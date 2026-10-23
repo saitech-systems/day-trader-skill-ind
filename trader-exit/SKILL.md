@@ -47,8 +47,28 @@ Symbols are NSE symbols (`RELIANCE`, `M&M`); a BSE listing is refused.
 | --- | --- |
 | `trader/entry.json` | the trigger from trader-entry: symbol, entry price, time, bar, opening range |
 | `trader/config.json` | `flat_by` (15:05) and `min_reward_risk` (1.0: a note here, trader-risk enforces it) |
-| Yahoo chart API | only for an `atr:K` stop: the session's bars up to the entry bar, free and unofficial |
+| Kite Connect (read only) | with today's login: the stock's own NSE tick from Kite's instrument list, and the bars for an `atr:K` stop |
+| Yahoo chart API | otherwise, only for an `atr:K` stop: the session's bars up to the entry bar, free and unofficial |
 | `trader/plan.json` | with `--write`: entry, stop and its rule, target and its R, risk a share, reward:risk, the tick, flat by. trader-timemachine, trader-budget and trader-alerts read it |
+
+## Data source
+
+`--source auto` (the default, or `"data_source"` in `trader/config.json`)
+reads the stock's own tick, and the session's bars for an `atr:K` stop, from
+the user's own Kite Connect app when they have logged in today
+(`python3 trader-broker/kite.py login`, then `kite.py session`; Zerodha ends
+every session at 6:00 AM), and from free Yahoo bars otherwise, saying so once.
+`--source kite` insists on Kite, `--source yahoo` skips it, `--offline` wins
+over both. Kite is read only here: it never places anything. The API key,
+secret and access token stay in the environment and in
+`trader/state/kite-session.json`: never ask for them, never print them, never
+paste them in the chat.
+
+With a Kite session the stop and the target round onto the stock's own tick from
+Kite's instrument list (NSE assigns it per stock and reviews it monthly);
+without one they use the NSE price band's tick for the entry price.
+`trader/plan.json` records which (`tick_source`: `kite` or `price band`, and
+`bars_source` for an ATR stop).
 
 ## Stops and targets
 

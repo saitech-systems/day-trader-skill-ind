@@ -52,8 +52,25 @@ symbols (`RELIANCE`, `M&M`, `BAJAJ-AUTO`); `RELIANCE.NS` works too, a BSE
 | file | what |
 | --- | --- |
 | `trader/plan.json` | the plan from trader-exit: symbol, date, entry, entry_time / entry_bar, stop, stop_rule, target, target_r, opening range, flat_by |
-| Yahoo chart API | one request: 60 days of 5-minute bars (`SYMBOL.NS`, `range=60d&interval=5m`), free and unofficial, can lag |
+| Kite Connect (read only) | after the daily login, one request: the same 60 sessions of 5-minute candles from your own Kite app, live and official |
+| Yahoo chart API | otherwise one request: 60 days of 5-minute bars (`SYMBOL.NS`, `range=60d&interval=5m`), free and unofficial, can lag |
 | `trader/timemachine.json` | with `--write`: `{plan, mc, history}` plus the verdict. `mc` holds the odds, percentiles, the fan-chart bands, 160 sample paths and a 24-bin histogram of the price at the end |
+
+## Data source
+
+`--source auto` (the default, or `"data_source"` in `trader/config.json`)
+reads the same 60 sessions of 5-minute candles from the user's own Kite Connect app when they have logged in today
+(`python3 trader-broker/kite.py login`, then `kite.py session`; Zerodha ends
+every session at 6:00 AM), and from free Yahoo bars otherwise, saying so once.
+`--source kite` insists on Kite, `--source yahoo` skips it, `--offline` wins
+over both. Kite is read only here: it never places anything. The header says
+which source it used ("Kite, live" or "Yahoo, free, can lag"). The API key,
+secret and access token stay in the environment and in
+`trader/state/kite-session.json`: never ask for them, never print them, never
+paste them in the chat.
+
+On the synthetic DEMO data both sources give the same replays bit for bit;
+the report ends with which one it used (`Bars: Kite, live.`).
 
 ## How it works
 
