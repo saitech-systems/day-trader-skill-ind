@@ -177,7 +177,11 @@ class Repo(unittest.TestCase):
 
     def test_the_holidays_are_weekdays_and_the_specials_are_not(self):
         for s, f, path in skill_files():
-            if f.endswith(".py") and "NSE_HOLIDAYS = {" in open(path, encoding="utf-8").read():
+            if not f.endswith(".py"):
+                continue
+            with open(path, encoding="utf-8") as fh:
+                has = "NSE_HOLIDAYS = {" in fh.read()
+            if has:
                 spec = importlib.util.spec_from_file_location("cal_" + f[:-3], path)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
