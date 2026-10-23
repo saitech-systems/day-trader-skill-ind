@@ -1,0 +1,28 @@
+{
+  "created_by": "trader-exit",
+  "symbol": "DEMO",
+  "side": "buy",
+  "date": "2026-10-19",
+  "setup": "orb",
+  "exchange": "NSE",
+  "tick": 0.1,
+  "entry": 1366.4,
+  "entry_time": "10:00 AM",
+  "entry_bar": 8,
+  "interval": "5m",
+  "opening_range": {
+    "high": 1363.8,
+    "low": 1351.3,
+    "minutes": 15
+  },
+  "stop": 1357.5,
+  "stop_rule": "or_mid",
+  "stop_label": "opening-range midpoint",
+  "target": 1375.3,
+  "target_r": 1.0,
+  "target_label": "1R (one times the risk)",
+  "risk_per_share": 8.9,
+  "reward_risk": 1.0,
+  "flat_by": "15:05",
+  "note": "A stop is a plan, not a guarantee: a gap or a fast market can fill past it."
+}
