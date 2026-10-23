@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 from contextlib import redirect_stdout, redirect_stderr
 
+from _kite import FakeKite
 from _load import load, FIX
 
 scan = load("trader-scanner", "scan")
@@ -27,6 +28,8 @@ DAILY = os.path.join(SDIR, "daily-spark-2026-10-19-synthetic.json")       # 13 d
 LISTS = os.path.join(SDIR, "lists")                                         # NSE's list files, trimmed
 SPARK5 = os.path.join(SDIR, "spark-5m-2026-10-19-1001-synthetic.json")    # "fetched" 10:01:47 IST
 DEMO5 = os.path.join(SDIR, "DEMO-5m-2026-10-19-1001-synthetic.json")      # DEMO's v8, fetched with it
+KITE = os.path.join(SDIR, "kite-2026-10-19-synthetic.json.gz")             # the same charts as Kite answers
+TOKEN = "demo_access_token"                                                 # FakeKite's session token
 DT = datetime.datetime
 D = datetime.date
 UNTIL = datetime.time(14, 45)
@@ -635,7 +638,7 @@ class Cli(unittest.TestCase):
             fh.write("\n".join(sorted(bundle)) + "\n")
         try:
             code, text, _ = run(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--min-price", "0",
-                                 "--max-confirm", "5", "--no-write"])
+                                 "--max-confirm", "5", "--no-write", "--source", "yahoo"])
         finally:
             scan.yahoo_get, scan.SLEEP, scan.parse_now = old_get, old_sleep, real_now
         self.assertEqual(code, 0)
@@ -739,6 +742,225 @@ class Cli(unittest.TestCase):
                              "DEMO"])
         self.assertEqual(code, 1)
         self.assertIn("Holiday list covers 2026 only: check nseindia.com for 2027-01-05.", text)
+
+
+class KiteSource(unittest.TestCase):
+    """--source kite: the user's own Kite Connect session, read only. A fake Kite
+    answers from the same synthetic charts (kite-2026-10-19-synthetic.json.gz), so
+    the Kite path must find exactly what the Yahoo path finds."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.files = tempfile.mkdtemp()
+        doc = json.loads(scan._read_maybe_gz(KITE))
+        inst = os.path.join(cls.files, "instruments.csv")
+        with open(inst, "w", encoding="utf-8") as fh:
+            fh.write(doc["instruments"])
+        cls.candles, cls.quotes = {}, {}
+        for key, answer in doc["candles"].items():
+            sym, interval = key.split("|")
+            path = os.path.join(cls.files, "c%d.json" % len(cls.candles))
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(answer, fh)
+            cls.candles[(doc["tokens"][sym], interval)] = path
+        for sym, answer in doc["quotes"].items():
+            path = os.path.join(cls.files, "q%d.json" % len(cls.quotes))
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(answer, fh)
+            cls.quotes[sym] = path
+        cls.inst = inst
+        cls.wall_syms = sorted(json.loads(scan._read_maybe_gz(WALL)))
+        cls.daily_syms = sorted(scan.load_offline(DAILY)[0])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.files)
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.d)                       # trader/state/... is relative, like a real project
+        FakeKite.session_file(self.d)
+        self.fake = FakeKite(candles=self.candles, quotes=self.quotes, instruments=self.inst)
+        self.old = (scan.kite_urlopen, scan.SLEEP, scan.yahoo_get)
+        self.fake.install(scan)
+        self.sleeps = []
+        scan.SLEEP = self.sleeps.append
+
+        def no_yahoo(path):
+            raise AssertionError("the Kite path asked Yahoo for %s" % path)
+        scan.yahoo_get = no_yahoo
+
+    def tearDown(self):
+        scan.kite_urlopen, scan.SLEEP, scan.yahoo_get = self.old
+        os.chdir(self.cwd)
+        shutil.rmtree(self.d)
+
+    def universe(self, syms):
+        path = os.path.join(self.d, "u.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(syms) + "\n")
+        return path
+
+    def run_json(self, argv):
+        code, text, err = run(argv + ["--json", "--no-write"])
+        self.assertNotIn(TOKEN, text + err)
+        return code, json.loads(text), err
+
+    def assert_read_only(self):
+        self.assertEqual(self.fake.methods(), {"GET"})
+        auth = {h.get("Authorization") for _, _, h in self.fake.requests}
+        self.assertEqual(auth, {"token demo_api_key:%s" % TOKEN})
+
+    def test_orb_finds_what_yahoo_finds(self):
+        uni = self.universe(self.wall_syms)
+        _, want, _ = self.run_json(["orb", "--offline", WALL, "--now", "2026-10-19 10:15", "--min-price", "0"])
+        code, got, _ = self.run_json(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--min-price", "0",
+                                      "--source", "kite"])
+        self.assertEqual(code, 0)
+        self.assertEqual(got["hits"], want["hits"])
+        self.assertEqual([h["symbol"] for h in got["hits"]], HITS_1015)
+        self.assertIn(DEMO_HIT, got["hits"])
+        self.assertEqual((got["source"], got["universe"], got["scanned"], got["failed"], got["unconfirmed"]),
+                         ("kite", 33, 28, 1, 0))
+        c = got["counts"]
+        self.assertEqual((c["quoted"], c["candles"], c["illiquid"], c["candidates"]), (32, 32, 0, 15))
+        paths = self.fake.paths()
+        self.assertEqual(paths.count("/quote"), 1)                       # one batch, up to 500 symbols
+        self.assertEqual(paths.count("/instruments/NSE"), 1)             # cached for the day after that
+        self.assertEqual(sum(1 for p in paths if p.startswith("/instruments/historical/")), 32)
+        self.assertIn("/instruments/historical/9000001/5minute", paths)  # DEMO, the shared candles
+        self.assertEqual(self.sleeps, [scan.KITE_PAUSE] * 31)            # 3 requests a second at most
+        self.assert_read_only()
+        cache = os.path.join(self.d, "trader", "state", "kite-instruments-NSE.json")
+        self.assertTrue(os.path.exists(cache))
+
+    def test_orb_text_floor_and_the_cap(self):
+        uni = self.universe(self.wall_syms)
+        code, text, err = run(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--source", "kite",
+                               "--no-write"])
+        self.assertEqual(code, 0)
+        self.assertNotIn(TOKEN, text + err)
+        self.assertIn("Opening-range breakout scan, Mon 2026-10-19 10:15 AM IST: 15-minute range (9:15 AM to "
+                      "9:30 AM), 5-minute bars (Kite, live), NSE.", text)
+        # PENNY's quote is under the Rs 20 floor, so it is never fetched
+        self.assertIn("Kite quotes for 32 of 33 symbols (1 had none); 1 under the price / volume floor; 5-minute "
+                      "candles for 31, the most traded first; 27 usable; 14 candidates, all checked with real "
+                      "highs and lows.", text)
+        self.assertIn("12 of 27 charts closed above their opening-range high by 10:15 AM", text)
+        self.assertIn("  10:00 AM  DEMO         Rs 1,366.40  range 1351.30 to 1363.80  +0.19% over", text)
+        self.assertNotIn("PENNY", text.split("closed above")[1])
+        n = len(self.fake.requests)
+        code, out, _ = self.run_json(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--min-price", "0",
+                                      "--source", "kite", "--max-confirm", "5"])
+        self.assertEqual(out["unconfirmed"], 27)
+        self.assertEqual(sum(1 for p in self.fake.paths()[n:] if p.startswith("/instruments/historical/")), 5)
+        code, text, _ = run(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--min-price", "0",
+                             "--source", "kite", "--max-confirm", "5", "--no-write"])
+        self.assertIn("PARTIAL: 27 more charts were not fetched (only the 5 most traded are; --max-confirm 0 "
+                      "fetches all).", text)
+        self.assert_read_only()
+
+    def test_daily_finds_what_yahoo_finds(self):
+        uni = self.universe(self.daily_syms)
+        for floors in (["--min-price", "0", "--min-volume", "0"], []):
+            _, want, _ = self.run_json(["daily", "--offline", DAILY, "--now", "2026-10-19 09:00"] + floors)
+            n = len(self.fake.requests)
+            code, got, _ = self.run_json(["daily", "--universe", uni, "--now", "2026-10-19 09:00",
+                                          "--source", "kite"] + floors)
+            asked = self.fake.paths()[n:]
+            self.assertEqual(code, 0)
+            self.assertEqual([(h["symbol"], h["setups"], h["price"], h["close_date"], h["rsi"]) for h in got["hits"]],
+                             [(h["symbol"], h["setups"], h["price"], h["close_date"], h["rsi"]) for h in want["hits"]])
+            self.assertEqual({k: got["counts"][k] for k in ("fetched", "illiquid", "short", "scanned", "hits")},
+                             {k: want["counts"][k] for k in ("fetched", "illiquid", "short", "scanned", "hits")})
+            self.assertEqual((got["source"], got["as_of"]), ("kite", "2026-10-16 close"))
+        self.assertEqual({h["symbol"]: h["setups"] for h in got["hits"]},
+                         {k: v for k, v in Daily.EXPECT.items() if k not in ("THIN", "CHEAP")})
+        # with the Rs 20 floor, CHEAP (Rs 15) is under it on its quote: no candles asked for it
+        tokens = json.loads(scan._read_maybe_gz(KITE))["tokens"]
+        self.assertNotIn("/instruments/historical/%d/day" % tokens["CHEAP"], asked)
+        self.assertEqual(sum(1 for p in asked if "/historical/" in p), 12)
+        self.assertTrue(all(p.endswith("/day") for p in self.fake.paths() if "/historical/" in p))
+        self.assert_read_only()
+        code, text, _ = run(["daily", "--universe", uni, "--now", "2026-10-19 09:00", "--source", "kite",
+                             "--no-write"])
+        self.assertIn("closes through 2026-10-16 (Kite day candles, live, NSE, daily closes only).", text)
+
+    def test_kite_volume_floor_reads_the_last_complete_day(self):
+        s = {"t": [scan.ts_of(scan.ist_to_utc(DT(2026, 10, d, 0, 0))) for d in (15, 16, 19)],
+             "c": [10.0, 11.0, 12.0], "v": [500, 700, 90], "meta": {}}
+        self.assertEqual(scan.last_complete_volume(s, scan.parse_now("2026-10-19 10:00")), 700)
+        self.assertEqual(scan.last_complete_volume(s, scan.parse_now("2026-10-19 15:31")), 90)
+
+    def test_auto_and_the_config(self):
+        uni = self.universe(["DEMO"])
+        # a session from today: auto is Kite
+        code, out, _ = self.run_json(["orb", "--universe", uni, "--now", "2026-10-19 10:15"])
+        self.assertEqual((out["source"], [h["symbol"] for h in out["hits"]]), ("kite", ["DEMO"]))
+        self.assertNotIn("source_note", out)
+        # the session ends at 6:00 AM IST: the next morning auto falls back to Yahoo, with one note
+        calls = []
+
+        def yahoo(path):
+            calls.append(path)
+            with open(DAILY, encoding="utf-8") as fh:
+                return fh.read()
+        scan.yahoo_get = yahoo
+        n = len(self.fake.requests)
+        code, text, _ = run(["daily", "--universe", uni, "--now", "2026-10-21 08:30", "--no-write"])
+        self.assertEqual(len(self.fake.requests), n)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(text.count("Data: no Kite session today, so free Yahoo data"), 1)
+        self.assertIn("(Yahoo spark, free, can lag, NSE, daily closes only)", text)
+        code, out, _ = self.run_json(["daily", "--universe", uni, "--now", "2026-10-21 08:30"])
+        self.assertEqual(out["source"], "yahoo")
+        self.assertIn("no Kite session today", out["source_note"])
+        # "data_source": "yahoo" in the config never asks Kite, even with a session
+        cfg = os.path.join(self.d, "cfg.json")
+        with open(cfg, "w") as fh:
+            json.dump({"data_source": "yahoo"}, fh)
+        code, out, _ = self.run_json(["daily", "--universe", uni, "--now", "2026-10-19 09:00", "--config", cfg])
+        self.assertEqual((out["source"], len(self.fake.requests)), ("yahoo", n))
+        # --offline wins over everything
+        code, out, _ = self.run_json(["orb", "--offline", WALL, "--now", "2026-10-19 10:15", "--source", "kite",
+                                      "--symbols", "DEMO"])
+        self.assertEqual((out["source"], len(self.fake.requests)), ("yahoo", n))
+
+    def test_no_session_and_refusals_are_one_plain_line(self):
+        uni = self.universe(self.wall_syms)
+        os.remove(os.path.join(self.d, "trader", "state", "kite-session.json"))
+        code, _, err = run(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--source", "kite"])
+        self.assertEqual(code, 1)
+        self.assertEqual(err.strip().splitlines(), ["scan.py: no Kite session for today: log in first (python3 "
+                                                    "trader-broker/kite.py login), or use --source yahoo"])
+        FakeKite.session_file(self.d)
+        refused = os.path.join(FIX, "shared", "kite", "error-token-synthetic.json")
+        self.fake.fail["/quote"] = (403, refused)
+        code, text, err = run(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--source", "kite",
+                               "--out", os.path.join(self.d, "wl.json"), "--quiet"])
+        self.assertEqual(code, 1)
+        self.assertEqual(len(err.strip().splitlines()), 1)                 # --quiet: no progress lines
+        self.assertIn("scan.py: Kite refused the session (TokenException: Incorrect `api_key` or `access_token`.)."
+                      " Log in again: python3 trader-broker/kite.py login", err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn(TOKEN, text + err)
+        self.assertFalse(os.path.exists(os.path.join(self.d, "wl.json")))
+        # a refusal halfway through the candles stops the scan at once
+        del self.fake.fail["/quote"]
+        self.fake.fail["/instruments/historical/"] = (403, refused)
+        n = len(self.fake.requests)
+        code, _, err = run(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--source", "kite", "--quiet"])
+        self.assertEqual(code, 1)
+        self.assertIn("Kite refused the session", err)
+        self.assertEqual(sum(1 for p in self.fake.paths()[n:] if "/historical/" in p), 1)
+        self.assert_read_only()
+
+    def test_a_symbol_kite_does_not_know(self):
+        uni = self.universe(["DEMO", "DELISTED"])
+        code, out, _ = self.run_json(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--source", "kite"])
+        self.assertEqual((out["universe"], out["failed"], [h["symbol"] for h in out["hits"]]), (2, 1, ["DEMO"]))
+        self.assertEqual(self.fake.paths().count("/instruments/historical/9000001/5minute"), 1)
 
 
 if __name__ == "__main__":

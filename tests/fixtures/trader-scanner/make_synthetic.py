@@ -36,6 +36,10 @@ DEMO's Monday from tests/fixtures/make_synthetic.py.
       a 5-minute spark answer for DEMO, SYNA and PENNY and DEMO's v8 chart as if
       fetched at 10:01:47 IST: the 10:00 bar is still forming and a live tick
       sits at 10:01:47.
+  kite-2026-10-19-synthetic.json.gz   the wall and the daily charts again, as Kite
+      Connect answers them (an NSE instrument list, 5-minute and day candles,
+      quotes at 10:49:45), for the Kite path: the same bars, so the same hits.
+      DEMO's own Kite answers are the shared ones (tests/fixtures/shared/kite/).
   lists/   NSE's list files in their own CSV shapes, trimmed: ind_nifty500list.csv
       (six real large caps by public name and ISIN, made-up synthetic rows, a BE
       row and a bad symbol), EQUITY_L.csv (padded headers; EQ, BE, BZ, SM and ST
@@ -337,6 +341,60 @@ def fo_mktlots():
     return "\n".join(pad(r, widths) for r in rows) + "\n"
 
 
+
+# ---------------------------------------------------------------- the same charts, as Kite answers them
+
+KITE_BASE = 9100001
+
+
+def kite_bundle():
+    """The wall and the daily charts as Kite Connect answers them, in one file:
+    {"instruments": CSV text, "candles": {"SYM|5minute" or "SYM|day": answer},
+    "quotes": {SYM: answer}}. DEMO keeps the shared token (9000001), so its
+    5-minute candles and its quote come from tests/fixtures/shared/kite/. Kite
+    has no live tick off the bar grid and no candle where nothing traded, so
+    those are left out; DELISTED is not an instrument at all."""
+    wall_doc, daily_doc = wall(), daily()
+    daily_items = {item["symbol"][:-3]: item for item in daily_doc["spark"]["result"]}
+    syms = sorted((set(wall_doc) | set(daily_items)) - {"DELISTED"})
+    tokens = {s: (ms.KITE_TOKENS["DEMO"] if s == "DEMO" else KITE_BASE + i) for i, s in enumerate(syms)}
+    candles, quotes, last_price = {}, {}, {}
+    for sym, doc in wall_doc.items():
+        if sym in ("DELISTED", "DEMO"):
+            continue
+        r = doc["chart"]["result"][0]
+        q = r["indicators"]["quote"][0]
+        bars = [(t, q["open"][i], q["high"][i], q["low"][i], q["close"][i], q["volume"][i])
+                for i, t in enumerate(r["timestamp"]) if q.get("close") and q["close"][i] is not None]
+        candles["%s|5minute" % sym] = ms.kite_candles(bars)
+        day = [b for b in bars if b[0] % 300 == 0] or [(slot_ts(0), 100.0, 100.0, 100.0, 100.0, 0)]
+        last_price[sym] = day[-1][4]
+        quotes[sym] = ms.kite_quote(sym, tokens[sym], day[-1][4], r["meta"]["previousClose"], day, FETCHED)
+    for sym, item in sorted(daily_items.items()):
+        resp = item["response"][0]
+        meta, closes = resp["meta"], resp["indicators"]["quote"][0]["close"]
+        rows = []
+        for t, c in zip(resp["timestamp"], closes):
+            if c is None:
+                continue               # Kite has no candle for a day without a close
+            d = (ms.EPOCH + datetime.timedelta(seconds=t) + ms.IST).date()
+            rows.append([d.isoformat() + "T00:00:00+0530", c, c, c, c, meta["regularMarketVolume"]])
+        candles["%s|day" % sym] = {"status": "success", "data": {"candles": rows}}
+        if sym not in quotes and sym != "DEMO":
+            px = meta["regularMarketPrice"]
+            quotes[sym] = ms.kite_quote(sym, tokens[sym], px, meta["previousClose"],
+                                        [(at("09:15"), px, px, px, px, meta["regularMarketVolume"])], FETCHED)
+            last_price[sym] = px
+    head = ("instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,tick_size,lot_size,"
+            "instrument_type,segment,exchange")
+    rows = []
+    for i, sym in enumerate(syms):
+        tick = ms.tick_of(last_price.get(sym, 1366.4))
+        rows.append(",".join([str(tokens[sym]), str(35500 + i), sym, name_of(sym).upper(), "0", "", "0",
+                              ("%.2f" % tick).rstrip("0").rstrip("."), "1", "EQ", "NSE", "NSE"]))
+    return {"instruments": head + "\n" + "\n".join(rows) + "\n", "tokens": tokens,
+            "candles": dict(sorted(candles.items())), "quotes": dict(sorted(quotes.items()))}
+
 def write_text(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as fh:
@@ -349,6 +407,7 @@ def main():
     spark, demo = live_five()
     ms.write(os.path.join(HERE, "spark-5m-2026-10-19-1001-synthetic.json"), spark)
     ms.write(os.path.join(HERE, "DEMO-5m-2026-10-19-1001-synthetic.json"), demo)
+    ms.write(os.path.join(HERE, "kite-2026-10-19-synthetic.json.gz"), kite_bundle())
     lists = os.path.join(HERE, "lists")
     write_text(os.path.join(lists, "ind_nifty500list.csv"), NIFTY500)
     write_text(os.path.join(lists, "ind_nifty50list.csv"), NIFTY50)

@@ -8,7 +8,9 @@ description: >-
   closing-high breakout, bull flag, reclaimed the 20-day average, oversold,
   oversold bounce) and an intraday opening-range breakout scan on 5-minute
   bars from the 9:15 open, India time, then writes trader/watchlist.json for
-  trader-news and trader-entry. Free Yahoo data (RELIANCE.NS), bar by bar.
+  trader-news and trader-entry. Live data from your own Kite Connect session
+  when you are logged in (read only), else free Yahoo data (RELIANCE.NS), bar
+  by bar.
   Use when the user says "scan the Nifty", "scan the market", "find me
   setups", "what is breaking out", "opening range breakouts", "ORB scan",
   "scan the F&O stocks", "scan for bull flags", "oversold stocks",
@@ -37,10 +39,12 @@ python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --symbols RELIANCE,TCS,M&M  # or --w
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb                               # after 9:35 AM IST -> trader/watchlist.json
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --at 10:15                    # cut the clock at 10:15 AM IST
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --watchlist trader/watchlist.json --json
+python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --source kite                 # insist on Kite (or --source yahoo)
 ```
 
 Flags: `--min-price 20` (rupees) and `--min-volume` (daily 2,00,000 shares,
-orb 0), `--or-minutes 15`, `--max-confirm 200` (orb stage 2),
+orb 0), `--or-minutes 15`, `--max-confirm 200` (charts with real highs and
+lows to fetch), `--source auto|kite|yahoo`,
 `--now "2026-10-19 10:15"` (India time) to pin the clock, `--offline PATH` to
 read saved files, `--no-write`, `--show N`, `--json`. Symbols are plain NSE
 symbols (RELIANCE, M&M, BAJAJ-AUTO); `RELIANCE.NS` and `NSE:RELIANCE` work
@@ -53,7 +57,8 @@ when it found nothing or could not run (the reason is one plain line).
 | --- | --- |
 | `trader/universe.txt` | written by `universe`: one `SYMBOL\|Name` a line, read by `daily` and `orb` |
 | `trader/watchlist.json` | written by `daily` and `orb`: `mode`, `as_of`, `universe`, `scanned`, `failed`, `exchange`, `hits[]`. trader-news and trader-entry read `hits[].symbol` (plain NSE symbols) |
-| `trader/config.json` | read by `orb`: `no_entries_after` (default 14:45) |
+| `trader/config.json` | read by `orb`: `no_entries_after` (default 14:45); by both: `data_source` (auto) |
+| `trader/state/kite-session.json` | your Kite session, written by `trader-broker/kite.py login`; read, never written here |
 
 ## The universe
 
@@ -133,6 +138,24 @@ year it says the holiday list is unknown: check nseindia.com. From 3 Aug to
 6 Dec 2026, F&O stocks stop continuous trading at 3:15 PM for the closing
 auction; the default cutoff is well before that.
 
+## Data source
+
+`--source auto` (the default, or `"data_source"` in `trader/config.json`)
+reads your own Kite Connect session when `trader-broker/kite.py` logged in
+today (the Connect plan carries the market data), else free Yahoo data with a
+one-line note; `--source kite` insists, `--source yahoo` never asks Kite. Kite
+is read only here: quotes and candles, never an order. `daily` asks one
+`/quote` batch (500 symbols a call) for the last price, then about 120 days
+of day candles per symbol, 0.35 s apart (Kite allows 3 requests a second), so
+the Nifty 500 takes about 3 minutes; a stock under `--min-price` on its quote
+is not fetched, and the volume floor reads the last complete day. `orb` asks
+one `/quote` batch for the price and volume floors (the live quote), then
+the day's 5-minute candles for the rest, the most traded first, at most
+`--max-confirm` of them (PARTIAL when it stops short); the hit rule is the
+same. A refused or expired session stops the scan in one plain line: log in
+again. The header says which source it used ("Kite, live" or "Yahoo, free,
+can lag"), and so does `source` in the watchlist.
+
 ## Data and limits
 
 - Yahoo's chart and spark endpoints are free, unofficial and can lag. Bars are
@@ -164,7 +187,7 @@ made-up NSE symbols, built to plan, not market data):
 
 ```
 python3 scan.py orb --offline wall5m-2026-10-19-synthetic.json.gz --now "2026-10-19 10:15" --min-price 0
-Opening-range breakout scan, Mon 2026-10-19 10:15 AM IST: 15-minute range (9:15 AM to 9:30 AM), 5-minute bars, Yahoo, NSE.
+Opening-range breakout scan, Mon 2026-10-19 10:15 AM IST: 15-minute range (9:15 AM to 9:30 AM), 5-minute bars (Yahoo, free, can lag), NSE.
 Fetched 32 of 33 charts (1 failed or had no data); 28 usable; 15 candidates, 15 confirmed with real highs and lows.
 13 of 28 charts closed above their opening-range high by 10:15 AM:
    9:35 AM  SYNA           Rs 414.60  range 409.70 to 413.35  +0.30% over
@@ -177,7 +200,8 @@ range is the 9:15 to 9:25 bars, high 1363.80, low 1351.30; the 9:35 bar
 wicked above the high and the 9:40 bar closed exactly at it, neither counts;
 the 9:55 bar closed at 1366.40, 0.19 % over the high, at 10:00 AM. The user
 picks DEMO and Claude hands it to `/trader-news DEMO`, then
-`/trader-entry DEMO`.
+`/trader-entry DEMO`. On the same charts served as Kite answers
+(`--source kite`), the scan finds the same 13.
 
 The pre-market scan of the test daily charts (closes through Fri 16 Oct)
 tags BRKOUT a 20-day breakout, FLAGGY a bull flag, RECLAIM a reclaim of the

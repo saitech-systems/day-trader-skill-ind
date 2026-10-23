@@ -66,6 +66,19 @@ Yahoo's endpoints are free, unofficial and can lag. query2 first, query1 on
 a 429 or 5xx, one retry after a pause on a 429. A polite pause between
 requests (--pause). Partial results are reported as partial.
 
+Kite (--source, or "data_source" in trader/config.json): auto, the default,
+reads your own Kite Connect session (trader-broker/kite.py login; the Connect
+plan carries the market data) when there is one from today, else Yahoo with a
+one-line note; kite insists, yahoo never asks. Read only: quotes and candles,
+never an order. daily: one /quote batch (500 symbols a call) for the last
+price, then about 120 days of day candles per symbol, 0.35 s apart (Kite
+allows 3 requests a second); a symbol under --min-price on its quote is not
+fetched, and the volume floor reads the last complete day's volume. orb: one
+/quote batch for the price and volume floors (the live quote), then the day's
+5-minute candles (real highs and lows) for the rest, the most traded first, at
+most --max-confirm of them, with the same hit rule. A refused session stops
+the scan in one plain line.
+
 --offline PATH reads files instead of the network: universe wants a folder
 with the NSE CSV it needs (ind_nifty500list.csv, fo_mktlots.csv or
 EQUITY_L.csv); daily and orb take a folder of <T>.json v8 chart files or
@@ -87,6 +100,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 UA = "Mozilla/5.0 (compatible; day-trader-skill-ind/1.0; +https://github.com/saitech-systems/day-trader-skill-ind)"
@@ -394,6 +408,231 @@ def spark_path(symbols, rng, interval):
 
 def chart_path(sym, rng, interval):
     return "/v8/finance/chart/%s?range=%s&interval=%s" % (to_yahoo(sym), rng, interval)
+
+
+# BEGIN KITE BLOCK
+# ---------------------------------------------------------------- Kite Connect, read only (market data, account)
+#
+# Your own Kite Connect app (developers.kite.trade; the Connect plan carries the
+# market data). trader-broker/kite.py logs in once a day and saves the session to
+# trader/state/kite-session.json; every tool reads it from there. Zerodha ends
+# every session at 6:00 AM IST. KITE_API_KEY + KITE_ACCESS_TOKEN in the
+# environment win over the file. This block only ever GETs: no orders.
+
+KITE_API = "https://api.kite.trade"
+KITE_SESSION = "trader/state/kite-session.json"
+KITE_INSTRUMENTS = "trader/state/kite-instruments-NSE.json"
+KITE_INTERVALS = {"1m": "minute", "5m": "5minute", "1d": "day"}
+KITE_PAUSE = 0.35           # historical candles: Kite allows 3 requests a second
+KITE_QUOTE_PAUSE = 1.0      # quotes: 1 request a second, up to 500 symbols each
+KITE_SOURCES = ("auto", "kite", "yahoo")
+
+
+def kite_urlopen(req, timeout=20):
+    """The one network call of the block (tests replace it)."""
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def kite_expiry(login_utc):
+    """Kite sessions end at 6:00 AM IST after the login: naive UTC."""
+    local = to_ist(login_utc)
+    six = datetime.datetime.combine(local.date(), datetime.time(6, 0))
+    if local >= six:
+        six += datetime.timedelta(days=1)
+    return ist_to_utc(six)
+
+
+def kite_session(path=KITE_SESSION, now_utc=None):
+    """The saved session while it is valid, else None. Never prints the token."""
+    key, token = os.environ.get("KITE_API_KEY"), os.environ.get("KITE_ACCESS_TOKEN")
+    if key and token:
+        return {"api_key": key, "access_token": token, "source": "environment"}
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        login = datetime.datetime.strptime(doc["login_utc"], "%Y-%m-%dT%H:%M:%SZ")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not doc.get("api_key") or not doc.get("access_token"):
+        return None
+    if (now_utc or utc_now()) >= kite_expiry(login):
+        return None
+    return dict(doc, source=path)
+
+
+def kite_request(sess, path, params=None, timeout=20):
+    """GET one Kite path: the raw body text. Plain-words ScanError on failure."""
+    query = urllib.parse.urlencode(params or [], doseq=True)
+    url = KITE_API + path + ("?" + query if query else "")
+    req = urllib.request.Request(url, headers={
+        "X-Kite-Version": "3", "User-Agent": UA,
+        "Authorization": "token %s:%s" % (sess["api_key"], sess["access_token"])})
+    try:
+        with kite_urlopen(req, timeout) as r:
+            return r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            doc = json.loads(e.read().decode("utf-8", "replace"))
+            why = "%s: %s" % (doc.get("error_type") or "error", doc.get("message") or "")
+        except Exception:
+            why = "HTTP %d" % e.code
+        finally:
+            e.close()
+        if e.code in (401, 403):
+            raise ScanError("Kite refused the session (%s). Log in again: python3 trader-broker/kite.py login" % why)
+        if e.code == 429:
+            raise ScanError("Kite says too many requests (%s): wait a few seconds and try again" % why)
+        raise ScanError("Kite answered HTTP %d for %s (%s)" % (e.code, path, why))
+    except urllib.error.URLError as e:
+        raise ScanError("could not reach Kite (%s): check the connection" % (e.reason,))
+    except OSError as e:
+        raise ScanError("could not reach Kite: %s" % (e,))
+
+
+def kite_get(sess, path, params=None):
+    """GET a Kite JSON path: its "data"."""
+    text = kite_request(sess, path, params)
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        raise ScanError("Kite sent something that is not JSON for %s" % path)
+    if doc.get("status") != "success":
+        raise ScanError("Kite said %s for %s: %s" % (doc.get("error_type") or "error", path, doc.get("message")))
+    return doc.get("data")
+
+
+def kite_instruments(sess, path=KITE_INSTRUMENTS, now_utc=None):
+    """{SYMBOL: {"token", "tick", "name", "lot"}} for NSE equities, from Kite's
+    instrument dump, cached for the day (Kite rebuilds it every morning)."""
+    today = to_ist(now_utc or utc_now()).date().isoformat()
+    if path and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+            if doc.get("date") == today and doc.get("rows"):
+                return doc["rows"]
+        except (OSError, ValueError, AttributeError):
+            pass
+    text = kite_request(sess, "/instruments/NSE")
+    rows = {}
+    for r in csv.DictReader(io.StringIO(text)):
+        if r.get("segment") != "NSE" or r.get("instrument_type") != "EQ":
+            continue
+        try:
+            rows[r["tradingsymbol"].strip().upper()] = {
+                "token": int(r["instrument_token"]), "tick": float(r.get("tick_size") or 0.05),
+                "name": (r.get("name") or "").strip(), "lot": int(float(r.get("lot_size") or 1))}
+        except (KeyError, ValueError):
+            continue
+    if not rows:
+        raise ScanError("Kite's NSE instrument list came back empty")
+    if path:
+        try:
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"date": today, "rows": rows}, fh)
+        except OSError:
+            pass
+    return rows
+
+
+def kite_ts(text):
+    """"2026-10-19T09:15:00+0530" -> Unix seconds."""
+    dt = datetime.datetime.strptime(str(text).strip(), "%Y-%m-%dT%H:%M:%S%z")
+    return int((dt - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)).total_seconds())
+
+
+def kite_quotes(sess, symbols, pause=KITE_QUOTE_PAUSE):
+    """{SYM: {"price", "prev_close", "time" (naive UTC or None), "volume"}}, 500 a call."""
+    syms = [nse_symbol(s) for s in symbols]
+    out = {}
+    for i in range(0, len(syms), 500):
+        if i:
+            time.sleep(pause)
+        batch = syms[i:i + 500]
+        data = kite_get(sess, "/quote", [("i", "NSE:" + s) for s in batch]) or {}
+        for s in batch:
+            d = data.get("NSE:" + s)
+            if not d or d.get("last_price") is None:
+                continue
+            stamp = d.get("last_trade_time") or d.get("timestamp")
+            when = None
+            if stamp:
+                try:
+                    when = ist_to_utc(datetime.datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S"))
+                except ValueError:
+                    when = None
+            out[s] = {"price": float(d["last_price"]), "prev_close": (d.get("ohlc") or {}).get("close"),
+                      "time": when, "volume": d.get("volume")}
+    return out
+
+
+def kite_chart(sess, sym, interval, start_day, end_day, now_utc=None, with_quote=True):
+    """Kite candles for one NSE stock from start_day to end_day (dates, IST),
+    returned as Yahoo chart JSON v8 text: the tool then reads it exactly like a
+    Yahoo answer. A forming candle comes back too; the tool's own closed-bar
+    rule decides when it counts. with_quote adds the previous close and the
+    last price from Kite's quote."""
+    sym = nse_symbol(sym)
+    if interval not in KITE_INTERVALS:
+        raise ScanError("Kite candles here are 1m, 5m or 1d, not %r" % interval)
+    inst = kite_instruments(sess, now_utc=now_utc).get(sym)
+    if not inst:
+        raise ScanError("Kite has no NSE equity called %s" % sym)
+    data = kite_get(sess, "/instruments/historical/%d/%s" % (inst["token"], KITE_INTERVALS[interval]),
+                    [("from", "%s 09:00:00" % start_day), ("to", "%s 16:00:00" % end_day)]) or {}
+    q = {"open": [], "high": [], "low": [], "close": [], "volume": []}
+    stamps = []
+    for row in data.get("candles") or []:
+        try:
+            t = kite_ts(row[0])
+            o, h, lo, c = (float(x) for x in row[1:5])
+        except (ValueError, TypeError, IndexError):
+            continue
+        stamps.append(t)
+        for k, v in zip(("open", "high", "low", "close"), (o, h, lo, c)):
+            q[k].append(v)
+        q["volume"].append(int(row[5]) if len(row) > 5 and row[5] is not None else 0)
+    now_ts = ts_of(now_utc or utc_now())
+    step = {"1m": 60, "5m": 300, "1d": 86400}[interval]
+    last_end = (stamps[-1] + step) if stamps else now_ts
+    meta = {"symbol": yahoo_symbol(sym), "currency": "INR", "exchangeName": "NSI", "fullExchangeName": "NSE",
+            "instrumentType": "EQUITY", "dataGranularity": interval, "gmtoffset": 19800, "timezone": "IST",
+            "exchangeTimezoneName": "Asia/Kolkata", "regularMarketTime": min(now_ts, last_end),
+            "longName": inst["name"], "tickSize": inst["tick"], "source": "kite"}
+    if stamps:
+        meta["regularMarketPrice"] = q["close"][-1]
+    if with_quote:
+        time.sleep(KITE_PAUSE)
+        quote = kite_quotes(sess, [sym]).get(sym) or {}
+        if quote.get("prev_close"):
+            meta["previousClose"] = meta["chartPreviousClose"] = float(quote["prev_close"])
+        if quote.get("price") is not None:
+            meta["regularMarketPrice"] = quote["price"]
+    return json.dumps({"chart": {"result": [{"meta": meta, "timestamp": stamps, "indicators": {"quote": [q]}}],
+                                 "error": None}})
+
+
+def pick_source(choice=None, cfg=None, now_utc=None, path=KITE_SESSION):
+    """(source, session, note). --source wins, then "data_source" in the config.
+    "auto" (the default) is Kite when a session from today is saved, else Yahoo."""
+    want = str(choice or (cfg or {}).get("data_source") or "auto").strip().lower()
+    if want not in KITE_SOURCES:
+        raise ScanError("data source is auto, kite or yahoo, not %r" % want)
+    if want == "yahoo":
+        return "yahoo", None, ""
+    sess = kite_session(path, now_utc)
+    if sess:
+        return "kite", sess, ""
+    if want == "kite":
+        raise ScanError("no Kite session for today: log in first (python3 trader-broker/kite.py login), "
+                        "or use --source yahoo")
+    return "yahoo", None, "no Kite session today, so free Yahoo data (log in with trader-broker/kite.py for live Kite data)"
+# END KITE BLOCK
 
 
 # ---------------------------------------------------------------- parsing
@@ -877,6 +1116,98 @@ def fetch_spark(symbols, rng, interval, pause, a=None):
     return data, failed
 
 
+def source_words(src):
+    return "Kite, live" if src == "kite" else "Yahoo, free, can lag"
+
+
+def kite_charts(sess, symbols, interval, start_day, end_day, now_utc, a=None, pause=KITE_PAUSE):
+    """kite_chart for each symbol, KITE_PAUSE apart -> ({SYM: series}, {SYM: error}).
+    A refused session stops the scan at once: every later request would be refused too."""
+    data, failed = {}, {}
+    for k, sym in enumerate(symbols):
+        if k and pause:
+            SLEEP(pause)
+        try:
+            data[sym] = parse_chart(kite_chart(sess, sym, interval, start_day, end_day, now_utc=now_utc,
+                                               with_quote=False), sym)
+        except ScanError as e:
+            if str(e).startswith("Kite refused the session"):
+                raise
+            failed[sym] = str(e)
+        if a is not None and len(symbols) > 50 and (k + 1) % 100 == 0:
+            progress(a, "  Kite candles: %d of %d symbols" % (k + 1, len(symbols)))
+    return data, failed
+
+
+def last_complete_volume(series, now_utc):
+    """The volume of the last COMPLETE daily bar (today's counts once the session closed)."""
+    now = to_ist(now_utc)
+    s = session(now.date())
+    today_done = s is None or now.time() >= s[1]
+    vol = None
+    for i, ts in enumerate(series["t"]):
+        d = ts_to_ist(ts).date()
+        if series["c"][i] is None or d > now.date() or (d == now.date() and not today_done):
+            continue
+        vol = (series.get("v") or [0] * len(series["t"]))[i] or 0
+    return vol
+
+
+def kite_daily(sess, symbols, now_utc, a):
+    """Daily closes from Kite: one /quote batch (500 symbols a call) for the last
+    price, then about 120 days of day candles per symbol, KITE_PAUSE apart. A
+    symbol under --min-price on its quote is not fetched. The volume floor reads
+    the last complete day's volume. -> (data, failed, under_price)."""
+    progress(a, "Kite: quotes for %s symbols, then day candles, %.2f s apart..." % (group(len(symbols)),
+                                                                                    KITE_PAUSE))
+    quotes = kite_quotes(sess, symbols)
+    today = to_ist(now_utc).date()
+    want, cheap, failed = [], [], {}
+    for s in symbols:
+        q = quotes.get(s)
+        if not q:
+            failed[s] = "no quote from Kite (not an NSE equity?)"
+        elif q["price"] < a.min_price:
+            cheap.append(s)
+        else:
+            want.append(s)
+    data, more = kite_charts(sess, want, "1d", today - datetime.timedelta(days=120), today, now_utc, a)
+    failed.update(more)
+    for s, series in data.items():
+        series["meta"]["regularMarketPrice"] = quotes[s]["price"]
+        series["meta"]["regularMarketVolume"] = last_complete_volume(series, now_utc)
+    return data, failed, cheap
+
+
+def kite_orb(sess, symbols, day, now_utc, a):
+    """The orb scan's data from Kite: one /quote batch (500 symbols a call) for the
+    price and volume floors, then the day's 5-minute candles (real highs and lows)
+    for the rest, the most traded first, at most --max-confirm of them, KITE_PAUSE
+    apart. The floors read the live quote. -> (data, failed, illiquid, not_fetched)."""
+    progress(a, "Kite: quotes for %s symbols, then 5-minute candles, %.2f s apart..."
+             % (group(len(symbols)), KITE_PAUSE))
+    quotes = kite_quotes(sess, symbols)
+    failed, illiquid, ranked = {}, [], []
+    for s in symbols:
+        q = quotes.get(s)
+        if not q:
+            failed[s] = "no quote from Kite (not an NSE equity?)"
+            continue
+        vol = q.get("volume") or 0
+        if q["price"] < a.min_price or vol < a.min_volume:
+            illiquid.append(s)
+            continue
+        ranked.append((s, q["price"] * vol))
+    ranked.sort(key=lambda x: (-x[1], x[0]))
+    skipped = []
+    if a.max_confirm and len(ranked) > a.max_confirm:
+        skipped = [s for s, _ in ranked[a.max_confirm:]]
+        ranked = ranked[:a.max_confirm]
+    data, more = kite_charts(sess, [s for s, _ in ranked], "5m", day, day, now_utc, a)
+    failed.update(more)
+    return data, failed, illiquid, skipped
+
+
 def read_symbols(a, offline_syms=None):
     if a.symbols:
         syms = [nse_symbol(s) for s in re.split(r"[,\s]+", a.symbols) if s]
@@ -1010,17 +1341,26 @@ def cmd_daily(a):
         data, failed = load_offline(a.offline)
         offline_syms = sorted(set(data) | set(failed))
     symbols = read_symbols(a, offline_syms)
+    src, src_note, cheap = "yahoo", "", []
     if not a.offline:
-        progress(a, "Fetching daily closes for %s symbols (%d spark requests)..."
-                 % (group(len(symbols)), (len(symbols) + SPARK_MAX - 1) // SPARK_MAX))
-        data, failed = fetch_spark(symbols, "3mo", "1d", a.pause, a)
+        src, sess, src_note = pick_source(a.source, read_config(a.config), now)
+        if src == "kite":
+            data, failed, cheap = kite_daily(sess, symbols, now, a)
+        else:
+            progress(a, "Fetching daily closes for %s symbols (%d spark requests)..."
+                     % (group(len(symbols)), (len(symbols) + SPARK_MAX - 1) // SPARK_MAX))
+            data, failed = fetch_spark(symbols, "3mo", "1d", a.pause, a)
     hits, counts, last_date = scan_daily(data, symbols, now, a.min_price, a.min_volume)
+    counts["fetched"] += len(cheap)      # Kite: under the price floor on its quote, so never fetched
+    counts["illiquid"] += len(cheap)
     nfailed = len(symbols) - counts["fetched"]
     as_of = ("%s close" % last_date.isoformat()) if last_date else None
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "daily",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
-           "source": "yahoo", "exchange": "NSE", "filters": {"min_price": a.min_price, "min_volume": a.min_volume},
+           "source": src, "exchange": "NSE", "filters": {"min_price": a.min_price, "min_volume": a.min_volume},
            "note": NOTE, "hits": hits}
+    if src_note:
+        doc["source_note"] = src_note
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
     if not a.no_write:
@@ -1029,8 +1369,11 @@ def cmd_daily(a):
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
     local = to_ist(now)
-    print("Daily scan, %s IST, closes through %s (Yahoo spark, NSE, daily closes only)." % (
-        local.strftime("%a %Y-%m-%d %H:%M"), last_date.isoformat() if last_date else "nothing"))
+    print("Daily scan, %s IST, closes through %s (%s, NSE, daily closes only)." % (
+        local.strftime("%a %Y-%m-%d %H:%M"), last_date.isoformat() if last_date else "nothing",
+        "Kite day candles, live" if src == "kite" else "Yahoo spark, free, can lag"))
+    if src_note:
+        print("Data: %s." % src_note)
     print("Fetched %s of %s charts%s. %s passed the liquidity filter (%s+ and %s+ shares)%s; "
           "%s scanned." % (group(counts["fetched"]), group(len(symbols)),
                            (" (%s failed or had no data)" % group(nfailed)) if nfailed else "",
@@ -1080,7 +1423,12 @@ def cmd_orb(a):
     day, cutoff = orb_window(now, at, a.or_minutes, until, explicit_day)
     symbols = read_symbols(a, offline_syms)
     confirm = None
+    src, src_note, illiquid, skipped = "yahoo", "", [], []
     if not a.offline:
+        src, sess, src_note = pick_source(a.source, cfg, now)
+    if not a.offline and src == "kite":
+        data, failed, illiquid, skipped = kite_orb(sess, symbols, day, now, a)
+    elif not a.offline:
         today = to_ist(parse_now(None)).date()
         if (today - day).days > 6:
             raise ScanError("Yahoo's free 5-minute history is short: replay %s with --offline" % day.isoformat())
@@ -1102,12 +1450,19 @@ def cmd_orb(a):
     failed = dict(failed or {})
     failed.update(failed2)
     nfailed = len([s for s in symbols if s in failed])
+    if src == "kite":
+        counts["quoted"] = len([s for s in symbols if not failed.get(s, "").startswith("no quote from Kite")])
+        counts["candles"] = counts["fetched"]
+        counts["illiquid"] += len(illiquid)
+        counts["unconfirmed"] = len(skipped)
     as_of = "%s %s IST" % (day.isoformat(), cutoff.strftime("%H:%M"))
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "orb",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
-           "unconfirmed": counts["unconfirmed"], "source": "yahoo", "exchange": "NSE", "or_minutes": a.or_minutes,
+           "unconfirmed": counts["unconfirmed"], "source": src, "exchange": "NSE", "or_minutes": a.or_minutes,
            "interval": "%dm" % BAR_MIN,
            "filters": {"min_price": a.min_price, "min_volume": a.min_volume}, "note": NOTE, "hits": hits}
+    if src_note:
+        doc["source_note"] = src_note
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
     if not a.no_write:
@@ -1116,25 +1471,39 @@ def cmd_orb(a):
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
     s = session(day)
-    print("Opening-range breakout scan, %s %s IST: %d-minute range (%s to %s), 5-minute bars, Yahoo, NSE."
+    print("Opening-range breakout scan, %s %s IST: %d-minute range (%s to %s), 5-minute bars (%s), NSE."
           % (day_label(day), clock_label(cutoff), a.or_minutes, clock_label(s[0]),
-             clock_label(slot(day, a.or_minutes // BAR_MIN))))
+             clock_label(slot(day, a.or_minutes // BAR_MIN)), source_words(src)))
+    if src_note:
+        print("Data: %s." % src_note)
     special = NSE_SPECIAL_SESSIONS.get(day.isoformat())
     if special:
         print("Special session today: %s, %s to %s IST." % (special[2], special[0], special[1]))
-    print("Fetched %s of %s charts%s; %s usable%s; %s candidates, %s confirmed with real highs and lows."
-          % (group(counts["fetched"]), group(len(symbols)),
-             (" (%s failed or had no data)" % group(nfailed)) if nfailed else "",
-             group(counts["scanned"]),
-             (" (%s under the price / volume floor)" % group(counts["illiquid"])) if counts["illiquid"] else "",
-             group(counts["candidates"]), group(counts["confirmed"])))
-    if counts["unconfirmed"]:
-        print("PARTIAL: %s more candidates were not checked (only the %s most traded are; --max-confirm 0 "
-              "checks all)." % (group(counts["unconfirmed"]), group(a.max_confirm)))
+    if src == "kite":
+        noq = len(symbols) - counts["quoted"]
+        print("Kite quotes for %s of %s symbols%s; %s under the price / volume floor; 5-minute candles for %s, "
+              "the most traded first%s; %s usable; %s candidates, all checked with real highs and lows."
+              % (group(counts["quoted"]), group(len(symbols)), (" (%s had none)" % group(noq)) if noq else "",
+                 group(counts["illiquid"]), group(counts["candles"]),
+                 (" (%s failed)" % group(nfailed - noq)) if nfailed - noq else "",
+                 group(counts["scanned"]), group(counts["candidates"])))
+        if counts["unconfirmed"]:
+            print("PARTIAL: %s more charts were not fetched (only the %s most traded are; --max-confirm 0 "
+                  "fetches all)." % (group(counts["unconfirmed"]), group(a.max_confirm)))
+    else:
+        print("Fetched %s of %s charts%s; %s usable%s; %s candidates, %s confirmed with real highs and lows."
+              % (group(counts["fetched"]), group(len(symbols)),
+                 (" (%s failed or had no data)" % group(nfailed)) if nfailed else "",
+                 group(counts["scanned"]),
+                 (" (%s under the price / volume floor)" % group(counts["illiquid"])) if counts["illiquid"] else "",
+                 group(counts["candidates"]), group(counts["confirmed"])))
+        if counts["unconfirmed"]:
+            print("PARTIAL: %s more candidates were not checked (only the %s most traded are; --max-confirm 0 "
+                  "checks all)." % (group(counts["unconfirmed"]), group(a.max_confirm)))
     if hits:
         print("%d of %s charts closed above their opening-range high by %s:"
-              % (len(hits), ("the %s checked" % group(counts["confirmed"])) if counts["unconfirmed"]
-                 else group(counts["scanned"]), clock_label(cutoff)))
+              % (len(hits), ("the %s checked" % group(counts["scanned" if src == "kite" else "confirmed"]))
+                 if counts["unconfirmed"] else group(counts["scanned"]), clock_label(cutoff)))
         for h in hits[:a.show]:
             print("  %8s  %-10s %13s  range %s to %s  %+.2f%% over" % (
                 h["at"], h["symbol"], price(h["price"]), _p(h["or_low"]), _p(h["or_high"]), h["pct_over"]))
@@ -1186,6 +1555,10 @@ def main(argv=None):
         p.add_argument("--show", type=int, default=50, help="hits to print (all are written)")
         p.add_argument("--quiet", action="store_true")
         p.add_argument("--json", action="store_true")
+        p.add_argument("--source", choices=KITE_SOURCES,
+                       help="auto (Kite when you are logged in today, else Yahoo), kite or yahoo; "
+                            "default: config data_source, auto")
+        p.add_argument("--config", default="trader/config.json")
 
     p = sub.add_parser("daily", help="pre-market setups from daily closes")
     common(p, 20.0, 200000)
@@ -1193,10 +1566,10 @@ def main(argv=None):
     common(p, 20.0, 0)
     p.add_argument("--or-minutes", type=int, default=15)
     p.add_argument("--max-confirm", type=int, default=MAX_CONFIRM,
-                   help="v8 charts to fetch in stage 2, most traded first (%d; 0 = all)" % MAX_CONFIRM)
+                   help="charts with real highs and lows to fetch, most traded first (%d; 0 = all): Yahoo "
+                        "v8 charts in stage 2, or Kite 5-minute candles" % MAX_CONFIRM)
     p.add_argument("--at", help="cut the clock at this India time, HH:MM")
     p.add_argument("--until", help="no new entries after HH:MM (default: config no_entries_after, 14:45)")
-    p.add_argument("--config", default="trader/config.json")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
