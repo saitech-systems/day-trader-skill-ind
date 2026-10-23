@@ -3,6 +3,7 @@
 
     python3 alerts.py clock                          # is the NSE open? next open / close
     python3 alerts.py quote RELIANCE --write         # quotes -> trader/prices.json
+    python3 alerts.py quote RELIANCE --source kite   # live, from your own Kite Connect API (read only)
     python3 alerts.py quote --holdings --write       # every symbol in your portfolio and plan
     python3 alerts.py quote --set RELIANCE=1369.85 --source kite   # store a price read from Kite (get_ltp)
     python3 alerts.py add --from-plan                # stop, target and flat-by time from trader/plan.json
@@ -31,14 +32,21 @@ for the plan's day only). An above / below alert rings ONCE and then stays
 quiet until you reset it, unless the rule has "rearm": true (it re-arms when
 the price crosses back). A pct_move alert rings at most once per day.
 
-Quotes (free, delayed, unofficial; for alerts only, never for timing an order):
-  yahoo   https://query2.finance.yahoo.com/v8/finance/chart/RELIANCE.NS (falls back
+Quotes (for alerts and sizing checks, never for timing an order). --source
+picks them, else "data_source" in trader/config.json, else auto:
+  kite    your own Kite Connect API (Connect plan), READ ONLY: one
+          https://api.kite.trade/quote request for every symbol, live last price,
+          previous close and the time of the last trade. It needs today's login
+          (python3 trader-broker/kite.py login, then session), saved in
+          trader/state/kite-session.json; Zerodha ends it at 6:00 AM IST.
+  yahoo   free, delayed, unofficial:
+          https://query2.finance.yahoo.com/v8/finance/chart/RELIANCE.NS (falls back
           to query1 on a 429 or a 5xx; one retry with a pause on a 429; one
           request per symbol, half a second apart)
-  kite    Zerodha's Kite connector (get_ltp) gives a live price; Claude stores it
-          with quote --set SYMBOL=PRICE --source kite, so sizing and the risk
-          check can use it
-  --offline DIR reads DIR/yahoo-<SYMBOL>.json (or .json.gz) instead.
+  auto    Kite when a session from today is saved, else Yahoo (and it says so)
+  quote --set SYMBOL=PRICE --source kite stores a price read elsewhere (the Kite
+  MCP connector's get_ltp), so sizing and the risk check can use it.
+  --offline DIR reads DIR/yahoo-<SYMBOL>.json (or .json.gz) instead, whatever --source says.
 
 NSE calendar: the 2026 equity holidays and special sessions (the Budget-day
 Sunday and Muhurat trading) from the NSE holiday list (nseindia.com, read
@@ -639,8 +647,52 @@ def _offline_text(folder, sym):
     raise AlertError("no offline quote file %s" % base)
 
 
-def get_quotes(symbols, offline=None, pause=PAUSE):
-    """{SYM: quote} and [errors]. One Yahoo request per symbol, with a pause between."""
+SOURCE_WORDS = {"kite": "Kite, live", "yahoo": "Yahoo, free, delayed", "offline": "saved Yahoo files"}
+
+
+def source_for(a, now):
+    """(source, Kite session or None, note). --offline reads saved Yahoo files and wins;
+    else --source, then "data_source" in the config, else auto."""
+    if a.offline:
+        return "yahoo", None, ""
+    cfg = _read(a.config, {}) if getattr(a, "config", None) else {}
+    return pick_source(a.source, cfg if isinstance(cfg, dict) else {}, now)
+
+
+def get_kite_quotes(symbols, sess):
+    """{SYM: quote} and [errors] from ONE Kite /quote request for every symbol."""
+    quotes, errors, syms = {}, [], []
+    for raw in symbols:
+        try:
+            s = nse_symbol(raw)
+        except AlertError as e:
+            errors.append(str(e))
+            continue
+        if s not in syms:
+            syms.append(s)
+    if not syms:
+        return quotes, errors
+    try:
+        got = kite_quotes(sess, syms)
+    except AlertError as e:
+        return quotes, errors + [str(e)]
+    for s in syms:
+        q = got.get(s)
+        if not q:
+            errors.append("Kite has no quote for %s" % s)
+            continue
+        quotes[s] = {"symbol": s, "price": float(q["price"]),
+                     "prev_close": float(q["prev_close"]) if q.get("prev_close") else None,
+                     "time": q["time"].strftime("%Y-%m-%dT%H:%M:%SZ") if q.get("time") else "",
+                     "source": "kite"}
+    return quotes, errors
+
+
+def get_quotes(symbols, offline=None, pause=PAUSE, source="yahoo", sess=None):
+    """{SYM: quote} and [errors]. Yahoo: one request per symbol, with a pause between.
+    Kite: one request for all of them. --offline (saved Yahoo files) wins."""
+    if source == "kite" and not offline:
+        return get_kite_quotes(symbols, sess)
     quotes, errors = {}, []
     asked = 0
     for raw in symbols:
@@ -928,7 +980,7 @@ def cmd_quote(a):
     now = parse_now(a.now)
     if a.set:
         source = a.source or "manual"
-        if source == "yahoo":
+        if source not in ("kite", "manual"):
             raise AlertError("--set stores a price you read elsewhere: --source kite (Kite's get_ltp) or manual")
         quotes = parse_set(a.set, source, now)
         path = a.write or "trader/prices.json"
@@ -937,18 +989,20 @@ def cmd_quote(a):
             print("%-10s %s  %s  [%s]" % (s, rs(q["price"]), q["time"], source))
         print("Wrote %d price(s) to %s." % (len(quotes), path))
         return 0
-    if a.source and a.source != "yahoo":
-        raise AlertError("only Yahoo quotes are fetched here; a Kite price comes from Claude's Kite connector "
-                         "(get_ltp): store it with quote --set SYMBOL=PRICE --source kite")
+    if a.source == "manual":
+        raise AlertError("--source manual goes with --set SYMBOL=PRICE (a price you read elsewhere)")
     syms = _dedupe([s.upper() for s in a.symbols] + (holdings(a) if a.holdings else []))
     if not syms:
         raise AlertError("which symbols? alerts.py quote RELIANCE TCS, or --holdings")
-    quotes, errors = get_quotes(syms, a.offline)
+    source, sess, note = source_for(a, now)
+    quotes, errors = get_quotes(syms, a.offline, source=source, sess=sess)
     if a.write and quotes:
-        write_prices(a.write, quotes, now, "yahoo")
+        write_prices(a.write, quotes, now, source)
     if a.json:
-        print(json.dumps({"quotes": quotes, "errors": errors}, indent=2))
+        print(json.dumps({"source": source, "quotes": quotes, "errors": errors}, indent=2))
     else:
+        if note:
+            print("note: " + note)
         for s in _dedupe([_plain(x) for x in syms]):
             q = quotes.get(s)
             if q:
@@ -961,7 +1015,12 @@ def cmd_quote(a):
             print("error: " + e)
         if a.write and quotes:
             print("Wrote %d price(s) to %s." % (len(quotes), a.write))
-        print("Quotes are free, delayed and unofficial: for alerts only. Your broker's price is the one that fills.")
+        if source == "kite":
+            print("Quotes from Kite, live as of each time shown: for alerts and sizing checks. Your fill is the "
+                  "price that counts.")
+        else:
+            print("Quotes are free, delayed and unofficial: for alerts only. Your broker's price is the one that "
+                  "fills.")
     return 0 if quotes else 1
 
 
@@ -974,18 +1033,23 @@ def cmd_check(a):
     status = market_status(now)
     watched = [r for r in rules if active(r, status["date"])]
     syms = _dedupe([str(r.get("symbol", "")).upper() for r in watched if r.get("type") not in NO_QUOTE])
-    quotes, errors = (get_quotes(syms, a.offline) if syms else ({}, []))
+    source, sess, note = source_for(a, now) if syms else ("yahoo", None, "")
+    quotes, errors = (get_quotes(syms, a.offline, source=source, sess=sess) if syms else ({}, []))
     state = _read(a.state, {})
     rings, state = evaluate(rules, quotes, status, state, now)
     if not a.no_write:
         _write(a.state, state)
         if quotes:
-            write_prices(a.prices_out, quotes, now, "yahoo")
+            write_prices(a.prices_out, quotes, now, source)
     if a.json:
-        print(json.dumps({"market": status, "rings": rings, "errors": errors,
+        print(json.dumps({"market": status, "rings": rings, "errors": errors, "source": source if syms else None,
                           "quotes": {s: q["price"] for s, q in quotes.items()}}, indent=2))
     else:
         print("NSE %s (%s IST, %s)." % ("OPEN" if status["open"] else "closed", status["now_ist"], status["reason"]))
+        if syms:
+            print("Prices: %s." % SOURCE_WORDS["offline" if a.offline else source])
+        if note:
+            print("note: " + note)
         for r in rings:
             print("ALERT " + r["message"])
         if not rings:
@@ -1101,16 +1165,18 @@ def main(argv=None):
     def net(p):
         p.add_argument("--offline", metavar="DIR", help="read yahoo-<SYMBOL>.json files, no network")
         p.add_argument("--now", help="pretend it is this time (no offset = India time)")
+        p.add_argument("--config", default="trader/config.json", help="its data_source picks the quotes")
         p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("clock", help="is the NSE open?")
     p.add_argument("--now")
     p.add_argument("--json", action="store_true")
-    p = sub.add_parser("quote", help="latest delayed quotes, or store a Kite price")
+    p = sub.add_parser("quote", help="latest quotes (Kite live, or Yahoo delayed), or store a price")
     net(p)
     p.add_argument("symbols", nargs="*")
-    p.add_argument("--source", choices=["yahoo", "kite", "manual"],
-                   help="yahoo (fetched, the default) or, with --set, where the price came from")
+    p.add_argument("--source", choices=["auto", "kite", "yahoo", "manual"],
+                   help="where quotes come from: auto (the default: Kite with today's session, else Yahoo), "
+                        "kite or yahoo; with --set, where the price was read: kite or manual")
     p.add_argument("--set", action="append", metavar="SYMBOL=PRICE",
                    help="store a price read elsewhere (Kite get_ltp) in prices.json")
     p.add_argument("--holdings", action="store_true", help="add symbols from your portfolio and plan")
@@ -1120,6 +1186,8 @@ def main(argv=None):
                    help="save to prices.json (default trader/prices.json)")
     p = sub.add_parser("check", help="check every rule, ring what hit")
     net(p)
+    p.add_argument("--source", choices=["auto", "kite", "yahoo"],
+                   help="auto (the default: Kite with today's session, else Yahoo), kite or yahoo")
     p.add_argument("--rules", default="trader/alerts.json")
     p.add_argument("--state", default="trader/state/alerts.json")
     p.add_argument("--prices-out", default="trader/prices.json")

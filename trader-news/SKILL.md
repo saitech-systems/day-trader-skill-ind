@@ -46,7 +46,9 @@ Symbols are NSE symbols: `RELIANCE`, `M&M`, `BAJAJ-AUTO` (`RELIANCE.NS` and
 | `trader/portfolio.json` | what you hold (trader-broker records fills there) |
 | Yahoo Finance headline RSS | `https://feeds.finance.yahoo.com/rss/2.0/headline?s=RELIANCE.NS&region=IN&lang=en-IN` |
 | NSE corporate announcements | `https://www.nseindia.com/api/corporate-announcements?index=equities&symbol=RELIANCE&from_date=...&to_date=...`: what the company told the exchange |
-| Yahoo Finance chart endpoint | the last price against the previous close (unofficial, can lag) |
+| Kite Connect quote (your API, read only) | the move: live last price against the previous close, one request for every symbol |
+| Yahoo Finance chart endpoint | the move without a Kite session (unofficial, can lag) |
+| `trader/config.json` | `data_source` (auto, kite or yahoo) for the move |
 | `trader/state/news.json` | what has been shown (kept 30 days) |
 
 nseindia.com sits behind bot protection. The tool visits the home page first
@@ -57,6 +59,15 @@ browser (`nseindia.com/companies-listing/corporate-filings-announcements`),
 skips NSE for the rest of the run and carries on with the headlines. It never
 retries in a loop. When that happens, open the page yourself (or ask the user
 to) before saying there were no filings.
+
+**Data source for the move.** `--source auto|kite|yahoo`, else `data_source`
+in `trader/config.json`, else `auto`: Kite when today's Kite Connect session
+is saved (trader-broker's `kite.py` logs in; Zerodha ends it at 6:00 AM IST),
+else Yahoo with a `note:` that there is no Kite session. With Kite, the price
+lines sit under "Prices: Kite, live." and come from ONE read-only request to
+`api.kite.trade/quote` for every symbol. A refused session is one `note:`
+line and the headlines carry on. Headlines and NSE announcements do not
+change with the source. Never ask for or repeat the Kite key, secret or token.
 
 ## The rules
 

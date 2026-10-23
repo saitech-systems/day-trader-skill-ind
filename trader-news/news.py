@@ -11,6 +11,7 @@ your symbols.
     python3 news.py --tickers RELIANCE --all --hours 72  # everything in the last 3 days, seen or not
     python3 news.py --no-nse                         # headlines only
     python3 news.py --no-moves                       # skip the price line per symbol
+    python3 news.py --source kite                    # the moves from your own Kite Connect API (read only)
 
 Your symbols, when --tickers is not given: every hit in trader/watchlist.json
 (trader-scanner), the symbol in trader/plan.json (trader-exit) and the
@@ -29,9 +30,15 @@ Sources, one request each per symbol:
     NSE calls. When NSE refuses anyway (HTTP 401/403 or a web page instead of
     JSON) it says so once, names the page to open in a browser, and carries on
     with the headlines. It never retries in a loop.
-  - The move: Yahoo Finance's chart endpoint (unofficial, can lag), the last
-    price against the previous close:
-    https://query2.finance.yahoo.com/v8/finance/chart/<SYMBOL>.NS?range=1d&interval=5m
+  - The move, the last price against the previous close. --source picks it,
+    else "data_source" in trader/config.json, else auto (Kite when today's
+    session is saved, else Yahoo, and it says so):
+      kite   your own Kite Connect API (Connect plan), READ ONLY: one
+             https://api.kite.trade/quote request for every symbol, live. It
+             needs today's login (python3 trader-broker/kite.py login, then
+             session); Zerodha ends it at 6:00 AM IST.
+      yahoo  Yahoo Finance's chart endpoint (unofficial, can lag), one per symbol:
+             https://query2.finance.yahoo.com/v8/finance/chart/<SYMBOL>.NS?range=1d&interval=5m
 
 Times print in India time (IST). State: trader/state/news.json remembers what
 you have seen (30 days), so an item shows once. Offline: --offline DIR reads
@@ -71,6 +78,7 @@ BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHT
 NSE_PAUSE = 1.0  # seconds between calls to nseindia.com
 KEEP_DAYS = 30
 MOVE_PCT = 3.0  # a stock this far from the previous close is flagged as moving
+SOURCE_WORDS = {"kite": "Kite, live", "yahoo": "Yahoo, free, can lag"}
 
 # What an NSE announcement is about, from its category (desc) or, failing that,
 # its text. First match wins: (pattern, label, important, tag).
@@ -681,8 +689,30 @@ def parse_chart(data, ticker):
             "time": datetime.datetime.fromtimestamp(when, datetime.timezone.utc) if when else None}
 
 
-def collect_moves(fetcher, watch, errors=None):
+def kite_moves(sess, watch, errors):
+    """The moves from ONE Kite /quote request for every symbol."""
+    syms = sorted(watch)
+    try:
+        got = kite_quotes(sess, syms)
+    except NewsError as exc:
+        errors.append("prices: %s" % exc)
+        return []
+    out = []
+    for t in syms:
+        q = got.get(t)
+        if not q or not q.get("prev_close"):
+            errors.append("price for %s: Kite has no quote with a previous close" % t)
+            continue
+        price, prev = float(q["price"]), float(q["prev_close"])
+        out.append({"ticker": t, "price": round(price, 2), "prev_close": round(prev, 2),
+                    "pct": round((price / prev - 1) * 100, 2), "time": aware(q["time"]) if q.get("time") else None})
+    return out
+
+
+def collect_moves(fetcher, watch, errors=None, source="yahoo", sess=None):
     errors = [] if errors is None else errors
+    if source == "kite" and not fetcher.offline:
+        return kite_moves(sess, watch, errors)
     out = []
     for t in sorted(watch):
         name = "chart-%s.json" % t
@@ -818,8 +848,10 @@ def render_moves(moves, move_pct=MOVE_PCT):
     return out
 
 
-def render(items, errors, now, moves=None, move_pct=MOVE_PCT):
+def render(items, errors, now, moves=None, move_pct=MOVE_PCT, source=None):
     out = render_moves(moves or [], move_pct)
+    if out and source:
+        out.insert(0, "Prices: %s." % SOURCE_WORDS.get(source, source))
     if out:
         out.append("")
     if not items:
@@ -862,6 +894,9 @@ def main(argv=None):
     ap.add_argument("--no-nse", action="store_true", help="headlines only, no NSE announcements")
     ap.add_argument("--no-moves", action="store_true", help="skip the price line per symbol")
     ap.add_argument("--move-pct", type=float, default=MOVE_PCT, help="flag a move this big (percent)")
+    ap.add_argument("--source", choices=["auto", "kite", "yahoo"],
+                    help="the moves: auto (the default: Kite with today's session, else Yahoo), kite or yahoo")
+    ap.add_argument("--config", default="trader/config.json", help="its data_source picks the moves")
     ap.add_argument("--offline", metavar="DIR")
     ap.add_argument("--now", help='pretend it is this India time, e.g. "2026-10-19 10:15"')
     ap.add_argument("--dry-run", action="store_true", help="do not update the state file")
@@ -876,7 +911,12 @@ def main(argv=None):
         else:
             watch = watch_from_files(args.portfolio, args.watchlist, args.plan)
         now = aware(parse_now(args.now))
-    except NewsError as exc:
+        source, sess, note = "yahoo", None, ""
+        if not (args.offline or args.no_moves):
+            cfg = load_json(args.config)
+            source, sess, note = pick_source(args.source, cfg if isinstance(cfg, dict) else {},
+                                             now.replace(tzinfo=None))
+    except (NewsError, ValueError) as exc:
         print("news: %s" % exc, file=sys.stderr)
         return 2
     if not watch:
@@ -884,19 +924,19 @@ def main(argv=None):
               "trader/watchlist.json).", file=sys.stderr)
         return 2
     state = load_json(args.state) or {}
-    errors = []
+    errors = [note] if note else []
     fetcher = Fetcher(offline=args.offline)
     items = collect(fetcher, watch, now, hours=args.hours, nse=not args.no_nse, errors=errors)
     items = dedupe(tag(items, watch))
     shown = select(items, state, now, hours=args.hours, show_all=args.all)
-    moves = [] if args.no_moves else collect_moves(fetcher, watch, errors)
+    moves = [] if args.no_moves else collect_moves(fetcher, watch, errors, source, sess)
     if args.json:
         mv = [dict(m, time=m["time"].isoformat() if m.get("time") else None,
                    moving=abs(m["pct"]) >= args.move_pct) for m in moves]
-        print(json.dumps({"checked": now.isoformat(), "moves": mv, "items": _json_ready(shown),
-                          "notes": errors}, indent=2))
+        print(json.dumps({"checked": now.isoformat(), "price_source": None if args.no_moves else source,
+                          "moves": mv, "items": _json_ready(shown), "notes": errors}, indent=2))
     else:
-        sys.stdout.write(render(shown, errors, now, moves, args.move_pct))
+        sys.stdout.write(render(shown, errors, now, moves, args.move_pct, None if args.offline else source))
     if not args.dry_run:
         remember(items, state, now)
         folder = os.path.dirname(args.state)

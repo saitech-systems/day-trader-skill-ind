@@ -2,6 +2,8 @@
 SYNTHETIC Yahoo chart JSON quotes (not market data) for made-up NSE stocks DEMO, SAMPLE and
 TESTCO, Yahoo's 404 answer for an unknown symbol (ZZZZ), and plan-demo.json, the shared DEMO
 story's plan (entry 1366.40, stop 1357.50, target 1375.30, flat by 15:05 on 2026-10-19).
+The same SAMPLE and TESTCO prices as Kite Connect /quote answers (kite-quote-*-synthetic.json);
+DEMO's Kite quote and the fake Kite server are shared (tests/fixtures/shared/kite/, tests/_kite.py).
 """
 
 import datetime
@@ -16,6 +18,7 @@ import urllib.error
 from contextlib import redirect_stdout, redirect_stderr
 
 from _load import load, ROOT, FIX
+from _kite import FakeKite, KDIR
 
 alerts = load("trader-alerts", "alerts")
 
@@ -504,7 +507,9 @@ class Cli(unittest.TestCase):
                             (["--set", "DEMO"], "SYMBOL=PRICE"),
                             (["--set", "DEMO=-3"], "above 0"),
                             (["--set", "DEMO.BO=10"], "BSE listing"),
-                            (["DEMO", "--source", "kite"], "get_ltp")):
+                            (["--set", "DEMO=1370", "--source", "auto"], "--source kite"),
+                            (["DEMO", "--source", "manual"], "goes with --set"),
+                            (["DEMO", "--source", "kite"], "kite.py login")):
             code, _, err = run(["quote", "--write", self.prices] + argv)
             self.assertEqual(code, 1, argv)
             self.assertIn(words, err, argv)
@@ -550,6 +555,170 @@ class Cli(unittest.TestCase):
         code, _, err = run(["check", "--rules", self.rules, "--offline", QDIR])
         self.assertEqual(code, 1)
         self.assertIn("no rules", err)
+
+
+class Kite(unittest.TestCase):
+    """Your own Kite Connect API, read only: live quotes in one request."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.d)                       # the tools find trader/state/kite-session.json from here
+        self.saved = (alerts.kite_urlopen, alerts._urlopen, alerts._sleep)
+        self.session = FakeKite.session_file(self.d)
+        self.fake = FakeKite(quotes={s: os.path.join(QDIR, "kite-quote-%s-synthetic.json" % s)
+                                     for s in ("SAMPLE", "TESTCO")}).install(alerts)
+        self.sess = alerts.kite_session(now_utc=ist("2026-10-19 10:53"))
+        self.prices = os.path.join(self.d, "prices.json")
+
+    def tearDown(self):
+        alerts.kite_urlopen, alerts._urlopen, alerts._sleep = self.saved
+        os.chdir(self.cwd)
+        shutil.rmtree(self.d)
+
+    def yahoo_net(self):
+        f = FakeNet([200, 200, 200])
+        alerts._urlopen, alerts._sleep = f.urlopen, f.sleeps.append
+        return f
+
+    def no_secrets(self, *texts):
+        for t in texts:
+            self.assertNotIn("demo_access_token", t)
+            self.assertNotIn("demo_api_key", t)
+
+    def test_kite_quotes_match_the_yahoo_ones_in_one_request(self):
+        kite, errors = alerts.get_quotes(["DEMO", "SAMPLE", "TESTCO", "demo"], source="kite", sess=self.sess)
+        yahoo, _ = alerts.get_quotes(["DEMO", "SAMPLE", "TESTCO"], QDIR)
+        self.assertEqual(errors, [])
+        for s in ("DEMO", "SAMPLE", "TESTCO"):
+            self.assertEqual((kite[s]["price"], kite[s]["prev_close"]), (yahoo[s]["price"], yahoo[s]["prev_close"]))
+            self.assertEqual(kite[s]["source"], "kite")
+        self.assertEqual((kite["DEMO"]["price"], kite["DEMO"]["prev_close"]), (1369.85, 1352.4))
+        self.assertEqual(kite["DEMO"]["time"], "2026-10-19T05:19:45Z")        # 10:49:45 IST, the last trade
+        self.assertEqual(self.fake.paths(), ["/quote"])
+        self.assertEqual(self.fake.methods(), {"GET"})
+        _, url, headers = self.fake.requests[0]
+        self.assertIn("i=NSE%3ADEMO&i=NSE%3ASAMPLE&i=NSE%3ATESTCO", url)
+        self.assertEqual(headers["X-kite-version"], "3")
+
+    def test_the_same_alerts_ring_on_kite_and_yahoo_prices(self):
+        rules = plan_rules() + [{"id": "demo-up", "symbol": "DEMO", "type": "above", "price": 1369.0},
+                                {"id": "sample-1", "symbol": "SAMPLE", "type": "pct_move", "pct": 1}]
+        kite, _ = alerts.get_quotes(["DEMO", "SAMPLE"], source="kite", sess=self.sess)
+        yahoo, _ = alerts.get_quotes(["DEMO", "SAMPLE"], QDIR)
+        for text in ("2026-10-19 10:53", "2026-10-19 15:05"):
+            now = ist(text)
+            rk, _ = alerts.evaluate(rules, kite, alerts.market_status(now), {}, now)
+            ry, _ = alerts.evaluate(rules, yahoo, alerts.market_status(now), {}, now)
+            self.assertEqual([r["id"] for r in rk], [r["id"] for r in ry])
+            self.assertIn("demo-up", [r["id"] for r in rk])
+            self.assertIn("sample-1", [r["id"] for r in rk])
+
+    def test_quote_from_kite_writes_prices(self):
+        code, out, err = run(["quote", "DEMO", "SAMPLE", "--source", "kite", "--write", self.prices,
+                              "--now", "2026-10-19 10:53"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("DEMO       Rs 1,369.85 (+1.29% vs prev close Rs 1,352.40)  2026-10-19T05:19:45Z  [kite]", out)
+        self.assertIn("Quotes from Kite, live", out)
+        self.assertNotIn("delayed", out)
+        with open(self.prices) as fh:
+            text = fh.read()
+        doc = json.loads(text)
+        self.assertEqual(doc["source"], "kite")
+        self.assertEqual(doc["prices"], {"DEMO": 1369.85, "SAMPLE": 245.17})
+        self.assertEqual(doc["detail"]["DEMO"], {"prev_close": 1352.4, "time": "2026-10-19T05:19:45Z",
+                                                 "source": "kite", "fetched": "2026-10-19T05:23:00Z"})
+        self.no_secrets(out, err, text)
+        self.assertEqual(self.fake.methods(), {"GET"})
+
+    def test_auto_is_kite_when_todays_session_is_saved(self):
+        code, out, err = run(["quote", "DEMO", "--json", "--now", "2026-10-19 10:53"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["source"], "kite")
+        self.assertEqual(self.fake.paths(), ["/quote"])
+
+    def test_check_reads_kite_and_still_rings_the_clock(self):
+        rules = os.path.join(self.d, "alerts.json")
+        state = os.path.join(self.d, "state.json")
+        self.assertEqual(run(["add", "--from-plan", "--plan", PLAN, "--rules", rules, "--state", state])[0], 0)
+        base = ["check", "--rules", rules, "--state", state, "--prices-out", self.prices]
+        code, out, err = run(base + ["--now", "2026-10-19 10:53"])
+        self.assertEqual(code, 1, err)
+        self.assertIn("Prices: Kite, live.", out)
+        self.assertIn("Nothing hit. 3 rule(s) watched today, DEMO Rs 1,369.85.", out)
+        code, out, err = run(base + ["--now", "2026-10-19 15:05"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("ALERT Flat by close", out)
+        with open(self.prices) as fh:
+            self.assertEqual(json.load(fh)["detail"]["DEMO"]["source"], "kite")
+        self.assertEqual(set(self.fake.paths()), {"/quote"})
+        self.no_secrets(out, err)
+
+    def test_a_refused_session_is_one_plain_line(self):
+        self.fake.fail["/quote"] = (403, os.path.join(KDIR, "error-token-synthetic.json"))
+        code, out, err = run(["quote", "DEMO", "SAMPLE", "--source", "kite", "--now", "2026-10-19 10:53"])
+        self.assertEqual(code, 1)
+        lines = [l for l in out.splitlines() if "Kite" in l and "refused" in l]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("Kite refused the session (TokenException: Incorrect `api_key` or `access_token`.). "
+                      "Log in again: python3 trader-broker/kite.py login", lines[0])
+        self.no_secrets(out, err)
+        # the clock still rings while Kite refuses: flat by is a time, not a price
+        rules = os.path.join(self.d, "alerts.json")
+        run(["add", "--from-plan", "--plan", PLAN, "--rules", rules, "--state", os.path.join(self.d, "s.json")])
+        code, out, _ = run(["check", "--rules", rules, "--state", os.path.join(self.d, "s.json"),
+                            "--prices-out", self.prices, "--now", "2026-10-19 15:05"])
+        self.assertEqual(code, 0)
+        self.assertIn("ALERT Flat by close", out)
+        self.assertIn("error: Kite refused the session", out)
+
+    def test_auto_falls_back_to_yahoo_without_a_session_and_says_so(self):
+        os.remove(self.session)
+        f = self.yahoo_net()
+        code, out, err = run(["quote", "DEMO", "--now", "2026-10-19 10:53"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.count("note: no Kite session today, so free Yahoo data"), 1)
+        self.assertIn("[yahoo]", out)
+        self.assertEqual(len(f.calls), 1)
+        self.assertEqual(self.fake.requests, [])
+
+    def test_an_expired_session_is_not_used(self):
+        FakeKite.session_file(self.d, login_ist=DT(2026, 10, 18, 8, 58, 1))     # ended at 06:00 on the 19th
+        self.assertIsNone(alerts.kite_session(now_utc=ist("2026-10-19 10:53")))
+        self.assertIsNotNone(alerts.kite_session(now_utc=ist("2026-10-19 05:59")))
+        f = self.yahoo_net()
+        code, out, err = run(["quote", "DEMO", "--now", "2026-10-19 10:53"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("note: no Kite session today", out)
+        self.assertEqual((len(f.calls), self.fake.requests), (1, []))
+        code, _, err = run(["quote", "DEMO", "--source", "kite", "--now", "2026-10-19 10:53"])
+        self.assertEqual(code, 1)
+        self.assertIn("no Kite session for today: log in first (python3 trader-broker/kite.py login)", err)
+
+    def test_offline_and_the_config_win(self):
+        code, out, err = run(["quote", "DEMO", "--source", "kite", "--offline", QDIR, "--json"])
+        self.assertEqual((code, json.loads(out)["source"]), (0, "yahoo"))
+        self.assertEqual(self.fake.requests, [])
+        with open(os.path.join(self.d, "cfg.json"), "w") as fh:
+            json.dump({"data_source": "yahoo"}, fh)
+        f = self.yahoo_net()
+        code, out, err = run(["quote", "DEMO", "--config", os.path.join(self.d, "cfg.json"), "--now",
+                              "2026-10-19 10:53"])
+        self.assertEqual(code, 0, err)
+        self.assertEqual((len(f.calls), self.fake.requests), (1, []))
+        self.assertNotIn("note:", out)
+        with open(os.path.join(self.d, "cfg.json"), "w") as fh:
+            json.dump({"data_source": "bloomberg"}, fh)
+        code, _, err = run(["quote", "DEMO", "--config", os.path.join(self.d, "cfg.json")])
+        self.assertEqual(code, 1)
+        self.assertIn("auto, kite or yahoo", err)
+
+    def test_a_symbol_kite_does_not_know_and_a_bse_one(self):
+        q, errors = alerts.get_quotes(["DEMO", "NOPE", "X.BO"], source="kite", sess=self.sess)
+        self.assertEqual(sorted(q), ["DEMO"])
+        self.assertEqual(errors, ["X.BO is a BSE listing: this pack trades NSE symbols (like RELIANCE)",
+                                  "Kite has no quote for NOPE"])
+        self.assertEqual(len(self.fake.requests), 1)
 
 
 if __name__ == "__main__":

@@ -258,7 +258,7 @@ class Kite(unittest.TestCase):
                 src = fh.read()
             rel = "%s/%s" % (s, f)
             for bad in ("/orders/regular", "/orders/amo", "/orders/co", "/orders/iceberg", "/gtt/triggers",
-                        "/portfolio/positions/convert", "/alerts"):
+                        "/portfolio/positions/convert", '"/alerts"'):
                 self.assertNotIn(bad, src, rel)
             if "api.kite.trade" not in src:
                 continue

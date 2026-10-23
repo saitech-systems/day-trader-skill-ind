@@ -13,6 +13,9 @@ for made-up NSE stocks, with fixed numbers so every run writes the same bytes:
   yahoo-TESTCO.json   TESTCO after Friday 2026-10-16's close: Rs 3,210.60,
                       previous close Rs 3,198.40
   yahoo-ZZZZ.json     Yahoo's answer for a symbol it does not know (HTTP 404 body)
+  kite-quote-SAMPLE-synthetic.json, kite-quote-TESTCO-synthetic.json
+                      the same SAMPLE and TESTCO prices as Kite Connect's /quote
+                      answers them (DEMO's is tests/fixtures/shared/kite/)
   plan-demo.json      the shared story's plan as trader-exit writes it
 """
 
@@ -56,6 +59,13 @@ def main():
         meta["longName"], meta["shortName"] = name, name.upper()
         ms.write(os.path.join(HERE, "yahoo-%s.json" % sym), doc)
     ms.write(os.path.join(HERE, "yahoo-ZZZZ.json"), NOT_FOUND)
+    for sym, name, fetched, (o, h, lo, c, v), prev in QUOTES[1:]:
+        bar = (ms.ts(DT.combine(fetched.date(), datetime.time(9, 15))), o, h, lo, c, v)
+        doc = ms.kite_quote(sym, ms.KITE_TOKENS[sym], c, prev, [bar], fetched)
+        q = doc["data"]["NSE:" + sym]
+        q["average_price"] = round((o + h + lo + c) / 4, 2)          # sane numbers for these stocks
+        q["lower_circuit_limit"], q["upper_circuit_limit"] = round(prev * 0.8, 2), round(prev * 1.2, 2)
+        ms.write(os.path.join(HERE, "kite-quote-%s-synthetic.json" % sym), doc)
     with open(os.path.join(HERE, "plan-demo.json"), "w", encoding="utf-8") as fh:
         json.dump(PLAN, fh, indent=2)
         fh.write("\n")

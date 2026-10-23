@@ -8,9 +8,10 @@ description: >-
   percent moves from the previous close, any time of day, and the NSE opening
   bell at 9:15, each ringing once so you are not spammed. Knows NSE hours in
   India time with the 2026 holidays, the Budget-day Sunday, Muhurat trading
-  and the closing auction, fetches free delayed quotes (Yahoo, SYMBOL.NS) one
-  symbol at a time, stores a live Kite get_ltp price when you have one, and
-  writes trader/prices.json for sizing and the risk check. Use when the user
+  and the closing auction, reads live quotes from your own Kite Connect API
+  (read only, one request for every symbol) or free delayed ones from Yahoo
+  (SYMBOL.NS), stores a Kite get_ltp price when you have one, and writes
+  trader/prices.json for sizing and the risk check. Use when the user
   says "alert me when", "tell me if RELIANCE hits 1,400", "watch my stop",
   "watch my trade", "remind me to square off by 3:05", "is the market open",
   "is NSE open today", "is it a holiday", "when does the market open", "get
@@ -40,6 +41,7 @@ python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --at 15:05 --label "flat by close" -
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol TCS --pct 3
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" check                          # exit 0 = something rang
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote RELIANCE --write         # -> trader/prices.json
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote RELIANCE --source kite   # live, from your Kite Connect API
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote --holdings --write       # portfolio + plan symbols
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote --set RELIANCE=1369.85 --source kite   # a Kite get_ltp price
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" list
@@ -56,7 +58,8 @@ listing is refused.
 | file | what |
 | --- | --- |
 | `trader/plan.json` | the trade from trader-exit, for `add --from-plan` |
-| `trader/config.json` | `flat_by` when the plan has none |
+| `trader/config.json` | `flat_by` when the plan has none; `data_source` (auto, kite or yahoo) |
+| `trader/state/kite-session.json` | today's Kite Connect login (trader-broker's `kite.py` writes it; read only here) |
 | `trader/alerts.json` | the rules (`alerts.example.json` in this folder) |
 | `trader/state/alerts.json` | which rules rang and when, so each rings once |
 | `trader/prices.json` | the latest prices, merged in, for trader-budget and trader-risk |
@@ -77,15 +80,28 @@ carry the plan's date, so yesterday's stop never rings today.
 
 ## Quotes
 
-- `yahoo` (default): `query2.finance.yahoo.com/v8/finance/chart/RELIANCE.NS`,
+**Data source.** `--source auto|kite|yahoo`, else `data_source` in
+`trader/config.json`, else `auto`: Kite when today's Kite Connect session is
+saved, else Yahoo, and the output says which ("Prices: Kite, live." or a note
+that there is no Kite session today). The Kite path is your own API key on
+the Connect plan, read only: `quote` and `check` send ONE request to
+`api.kite.trade/quote` for every symbol and get the live last price, the
+previous close (for `pct_move`) and the time of the last trade; nothing else
+is ever sent. Log in once a day with trader-broker's `kite.py` (Zerodha ends
+the session at 6:00 AM IST). A refused or expired session is one plain line
+telling you to log in again; time alerts still ring. `--offline` wins over
+every source.
+
+- `yahoo`: `query2.finance.yahoo.com/v8/finance/chart/RELIANCE.NS`,
   an unofficial free JSON endpoint, one request per symbol, half a second
   apart. On a 429 it waits and tries once more; on a 429 or a 5xx after that
   it tries `query1`. It identifies itself as `day-trader-skill-ind/1.0`.
-- `kite`: Zerodha's Kite connector (`get_ltp` with `["NSE:RELIANCE"]`, read
-  only, on the hosted `mcp.kite.trade` server too) gives a live last price.
-  Store it with `quote --set RELIANCE=1369.85 --source kite`, so sizing and
-  the risk check use it. It is live only at the moment it was read.
-- Free quotes are unofficial, delayed and can lag. They are fine for alerts
+- `kite`: your Kite Connect API, as above. Without the API, Zerodha's Kite
+  MCP connector (`get_ltp` with `["NSE:RELIANCE"]`, read only, on the hosted
+  `mcp.kite.trade` server too) also gives a live last price: store it with
+  `quote --set RELIANCE=1369.85 --source kite`. A Kite price is live only at
+  the moment it was read.
+- Free Yahoo quotes are unofficial, delayed and can lag. They are fine for alerts
   and for checking a size, not for timing an order. The broker's price is the
   one that fills. Each price in `trader/prices.json` keeps its time, and
   trader-risk only uses one under 15 minutes old.
@@ -122,10 +138,9 @@ holidays in December: for 2027 the clock says the holiday list is unknown.
    the three alerts back to the user: the stop, the target and the flat-by time.
 2. Run `check` while the trade is open: every few minutes from a Claude
    scheduled task or `/loop`. Each run fetches only the symbols in today's
-   rules and rings each alert once. A check reads the latest delayed quote;
-   it is not a live feed, and a price can pass a level between two checks.
-   With the Kite connector, `get_ltp` then `quote --set ... --source kite`
-   gives a fresher price.
+   rules and rings each alert once. A check reads the latest quote (live
+   from Kite with today's session, else delayed from Yahoo); it is not a
+   stream, and a price can pass a level between two checks.
 3. Tell the user what rang in one line each. A stop alert means the SL order
    has probably filled: check `get_orders` / `get_positions` and record the
    fill with trader-broker. A target alert or "flat by close" means getting
@@ -161,8 +176,9 @@ closed and the opening bell stays quiet. It rings on Wednesday at 9:15.
 ## Rules
 
 - An alert is a fact about a price or the clock. Say it as a fact.
-- Never present a Yahoo quote as live. A Kite `get_ltp` price is live only
-  at the moment it was read.
+- Never present a Yahoo quote as live. A Kite price is live only at the
+  moment it was read: say its time.
+- Never ask for, print or repeat the Kite API key, secret or access token.
 - Confirm every new rule back to the user: symbol, type, level, day.
 
 ## What it never does

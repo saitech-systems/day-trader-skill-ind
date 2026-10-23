@@ -14,6 +14,9 @@ sources answer with:
   chart-DEMO.json                         a copy of tests/fixtures/shared/
                                           DEMO-2026-10-19-5m-synthetic.json
   chart-SAMPLE.json                       a one-bar Yahoo chart, 3.45 % down
+  kite-quote-SAMPLE-synthetic.json        the same SAMPLE price as Kite Connect's
+                                          /quote answers it (DEMO's is in
+                                          tests/fixtures/shared/kite/)
 """
 
 import datetime
@@ -159,6 +162,13 @@ def main():
         "indicators": {"quote": [{"open": [413.0], "high": [413.5], "low": [411.9], "close": [412.35],
                                   "volume": [88000]}]}}], "error": None}}
     write("chart-SAMPLE.json", json.dumps(sample, separators=(",", ":")) + "\n")
+    kite = {"status": "success", "data": {"NSE:SAMPLE": {
+        "instrument_token": 9000003, "timestamp": "2026-10-19 10:49:45", "last_trade_time": "2026-10-19 10:49:45",
+        "last_price": 412.35, "last_quantity": 10, "buy_quantity": 41200, "sell_quantity": 52300,
+        "volume": 1288400, "average_price": 415.02, "oi": 0, "oi_day_high": 0, "oi_day_low": 0,
+        "net_change": -14.75, "lower_circuit_limit": 341.7, "upper_circuit_limit": 512.5,
+        "ohlc": {"open": 424.0, "high": 425.1, "low": 410.6, "close": 427.1}}}}
+    write("kite-quote-SAMPLE-synthetic.json", json.dumps(kite, separators=(",", ":")) + "\n")
     print("wrote trader-news fixtures to %s" % HERE)
 
 

@@ -8,6 +8,9 @@ nse-announcements-SAMPLE.json        an empty list
 nse-announcements-BLOCKED.json       the "Access Denied" page NSE's bot protection sends
 chart-DEMO.json                      tests/fixtures/shared/DEMO-2026-10-19-5m-synthetic.json
 chart-SAMPLE.json                    a one-bar Yahoo chart, 3.45 % under the previous close
+kite-quote-SAMPLE-synthetic.json     the same SAMPLE price as Kite Connect's /quote answers it
+                                     (DEMO's, and the fake Kite server: tests/fixtures/shared/kite/,
+                                     tests/_kite.py)
 """
 
 import datetime
@@ -21,6 +24,7 @@ import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
 
 from _load import FIX, load
+from _kite import FakeKite, KDIR
 
 news = load("trader-news", "news")
 DIR = os.path.join(FIX, "trader-news")
@@ -375,6 +379,118 @@ class Network(unittest.TestCase):
         items = news.collect(f, {"DEMO": None}, now, hours=48)
         self.assertIn("from_date=17-10-2026&to_date=19-10-2026", calls[2][0])
         self.assertEqual(len(items), 6)
+
+
+class Kite(unittest.TestCase):
+    """The moves from your own Kite Connect API, read only: one quote request for every symbol."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.tmp)                      # the tools find trader/state/kite-session.json from here
+        self.session = FakeKite.session_file(self.tmp)
+        self.fake = FakeKite(quotes={"SAMPLE": os.path.join(DIR, "kite-quote-SAMPLE-synthetic.json")})
+        self.saved = (news.kite_urlopen, news.Fetcher._open)
+        self.fake.install(news)
+        self.web = []
+        test = self
+
+        def fake_open(fetcher, url, headers):       # headlines and Yahoo charts from the fixture files
+            test.web.append(url)
+            if url.startswith("https://feeds.finance.yahoo.com/"):
+                sym = url.split("s=", 1)[1].split(".NS", 1)[0]
+                return raw("yahoo-%s.xml" % sym), "application/rss+xml"
+            if "/v8/finance/chart/" in url:
+                sym = url.split("/chart/", 1)[1].split(".NS", 1)[0]
+                return raw("chart-%s.json" % sym), "application/json"
+            raise urllib.error.URLError("not in this test: %s" % url)
+
+        news.Fetcher._open = fake_open
+        self.state = os.path.join(self.tmp, "state", "news.json")
+        self.files = ["--portfolio", os.path.join(self.tmp, "none.json"),
+                      "--watchlist", os.path.join(self.tmp, "none.json"),
+                      "--plan", os.path.join(self.tmp, "none.json"), "--state", self.state]
+        self.base = ["--tickers", "DEMO", "SAMPLE", "--hours", "6", "--dry-run", "--no-nse",
+                     "--now", "2026-10-19 10:52"] + self.files
+
+    def tearDown(self):
+        news.kite_urlopen, news.Fetcher._open = self.saved
+        os.chdir(self.cwd)
+        shutil.rmtree(self.tmp)
+
+    def charts(self):
+        return [u for u in self.web if "/v8/finance/chart/" in u]
+
+    def test_kite_moves_match_the_yahoo_ones_in_one_request(self):
+        sess = news.kite_session(now_utc=news.parse_now("2026-10-19 10:52"))
+        errors = []
+        kite = news.collect_moves(news.Fetcher(), {"DEMO": None, "SAMPLE": None}, errors, "kite", sess)
+        yahoo = news.collect_moves(news.Fetcher(offline=DIR), {"DEMO": None, "SAMPLE": None})
+        self.assertEqual(errors, [])
+        self.assertEqual([(m["ticker"], m["price"], m["prev_close"], m["pct"], m["time"]) for m in kite],
+                         [(m["ticker"], m["price"], m["prev_close"], m["pct"], m["time"]) for m in yahoo])
+        self.assertEqual((kite[0]["price"], kite[0]["prev_close"], kite[0]["pct"]), (1369.85, 1352.4, 1.29))
+        self.assertEqual(self.fake.paths(), ["/quote"])
+        self.assertEqual(self.fake.methods(), {"GET"})
+        self.assertEqual(self.charts(), [])
+
+    def test_the_price_line_from_kite(self):
+        code, out, err = run(self.base + ["--source", "kite"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("Prices: Kite, live.\n", out)
+        self.assertIn("DEMO       1369.85 +1.29% vs the previous close 1352.40 at 10:49 IST  \n", out)
+        self.assertIn("SAMPLE     412.35 -3.45% vs the previous close 427.10 at 10:49 IST  MOVING", out)
+        self.assertIn("2026-10-19 08:04 IST  DEMO", out)          # the headlines are unchanged
+        self.assertEqual(self.charts(), [])
+        self.assertEqual(self.fake.methods(), {"GET"})
+        for secret in ("demo_access_token", "demo_api_key"):
+            self.assertNotIn(secret, out + err)
+
+    def test_auto_is_kite_when_todays_session_is_saved(self):
+        code, out, err = run(self.base + ["--json"])
+        self.assertEqual(code, 0, err)
+        doc = json.loads(out)
+        self.assertEqual(doc["price_source"], "kite")
+        self.assertEqual([m["ticker"] for m in doc["moves"] if m["moving"]], ["SAMPLE"])
+        self.assertEqual(doc["notes"], [])
+
+    def test_a_refused_session_is_one_plain_line_and_the_headlines_carry_on(self):
+        self.fake.fail["/quote"] = (403, os.path.join(KDIR, "error-token-synthetic.json"))
+        code, out, err = run(self.base + ["--source", "kite"])
+        self.assertEqual(code, 0, err)
+        notes = [l for l in out.splitlines() if "Kite refused" in l]
+        self.assertEqual(notes, ["note: prices: Kite refused the session (TokenException: Incorrect `api_key` or "
+                                 "`access_token`.). Log in again: python3 trader-broker/kite.py login"])
+        self.assertNotIn("vs the previous close", out)
+        self.assertIn("2026-10-19 08:04 IST  DEMO", out)
+
+    def test_auto_without_a_session_reads_yahoo_and_says_so_once(self):
+        os.remove(self.session)
+        code, out, err = run(self.base)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out.count("note: no Kite session today, so free Yahoo data"), 1)
+        self.assertIn("Prices: Yahoo, free, can lag.", out)
+        self.assertIn("SAMPLE     412.35 -3.45% vs the previous close 427.10 at 10:49 IST  MOVING", out)
+        self.assertEqual(len(self.charts()), 2)
+        self.assertEqual(self.fake.requests, [])
+        code, _, err = run(self.base + ["--source", "kite"])
+        self.assertEqual(code, 2)
+        self.assertIn("no Kite session for today: log in first (python3 trader-broker/kite.py login)", err)
+
+    def test_an_expired_session_and_the_config(self):
+        FakeKite.session_file(self.tmp, login_ist=datetime.datetime(2026, 10, 18, 9, 0))   # ended 06:00 on the 19th
+        code, out, err = run(self.base + ["--json"])
+        self.assertEqual((code, json.loads(out)["price_source"]), (0, "yahoo"))
+        FakeKite.session_file(self.tmp)
+        cfg = os.path.join(self.tmp, "cfg.json")
+        with open(cfg, "w") as fh:
+            json.dump({"data_source": "yahoo"}, fh)
+        code, out, err = run(self.base + ["--json", "--config", cfg])
+        doc = json.loads(out)
+        self.assertEqual((code, doc["price_source"], doc["notes"]), (0, "yahoo", []))
+        self.assertEqual(self.fake.requests, [])
+        code, out, err = run(self.base + ["--json", "--offline", DIR, "--source", "kite"])
+        self.assertEqual((code, self.fake.requests), (0, []))       # --offline wins
 
 
 if __name__ == "__main__":
