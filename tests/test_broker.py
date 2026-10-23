@@ -1,6 +1,7 @@
 """trader-broker tests, on the SYNTHETIC DEMO story (a made-up NSE stock, see
 tests/fixtures/make_synthetic.py): tests/fixtures/trader-risk/orders-demo.json is what
 trader-budget writes, tests/fixtures/trader-budget/plan-demo.json is trader-exit's plan.
+The Kite order book that ticket.py match reads is tested in test_kite.py.
 """
 
 import io
@@ -147,10 +148,14 @@ class Flow(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.d)
 
-    def live(self):
+    def live(self, route="kite_mcp"):
         with open(self.cfg) as fh:
             c = json.load(fh)
         c["paper"] = False
+        if route is None:
+            c.pop("order_route", None)
+        else:
+            c["order_route"] = route
         with open(self.cfg, "w") as fh:
             json.dump(c, fh)
 
@@ -285,6 +290,72 @@ class Flow(unittest.TestCase):
         code, text, _ = run(["log", "--state", self.state, "--now", NOW])
         self.assertIn("id 261019000123999", text)
         self.assertIn("1 placed today", text)
+
+    def test_the_manual_route_is_the_live_default(self):
+        with open(CFG_PATH) as fh:
+            self.assertEqual(json.load(fh)["order_route"], "manual")
+        for route in ("manual", None):                     # the config's value, and the default without one
+            self.live(route)
+            self.assertEqual(self.run_risk(), 0)
+            code, text, _ = run(self.args("show", "--index", "1"))
+            self.assertEqual(code, 0)
+            self.assertIn("After your yes, YOU place this exact order in Kite (the app or kite.zerodha.com); "
+                          "Claude\n  does not place it:", text)
+            self.assertIn("    BUY 54 DEMO, limit 1366.40, MIS intraday, NSE, good for today\n", text)
+            self.assertIn("Once it is COMPLETE in Kite's order book, place its stop-loss yourself", text)
+            self.assertIn("ticket.py match --index 1 (and --leg stop)", text)
+            self.assertIn("Then you place it in Kite by hand: that is the last check", text)
+            self.assertNotIn("Allow once", text)
+            self.assertNotIn("Claude calls place_order", text)
+            self.assertEqual(json_blocks(text), [DEMO_CALL, DEMO_STOP_CALL])
+            self.assertEqual(json.loads(run(self.args("show", "--index", "1", "--json"))[1])["order_route"], "manual")
+            os.remove(self.risk)
+
+        self.run_risk()
+        code, text, _ = run(self.args("approve", "--index", "1", "--reply", "yes"))
+        self.assertEqual(code, 0)
+        self.assertIn("Now place exactly this order yourself in Kite (the app or kite.zerodha.com). Claude does "
+                      "not place it:\n  BUY 54 DEMO, limit 1366.40", text)
+        self.assertIn("kite.py orders --write, then ticket.py match --index 1.", text)
+        self.assertIn("SELL 54 DEMO, SL trigger 1357.50 limit 1354.10", text)
+        self.assertNotIn("place_order", text)
+        self.assertEqual(self.state_doc()["orders"][0]["route"], "manual")
+        code, text, _ = run(self.args("show", "--index", "1"))
+        self.assertIn("APPROVED by you at 2026-10-19T10:00:00+05:30, waiting for you to place it in Kite", text)
+        code, text, _ = run(self.args("result", "--index", "1", "--status", "placed", "--broker-id", "X1"))
+        self.assertIn("place its stop-loss yourself: SELL 54 DEMO, SL trigger 1357.50", text)
+        self.assertIn("ticket.py match --index 1 --leg stop", text)
+
+    def test_a_manual_flatten_says_cancel_it_in_kite(self):
+        self.live("manual")
+        code, text, _ = run(["flatten", "--symbol", "DEMO", "--qty", "54", "--price", "1371.20", "--orders",
+                             self.orders, "--portfolio", self.none, "--plan", PLAN_PATH, "--config", self.cfg,
+                             "--now", "2026-10-19 15:05"])
+        self.assertEqual(code, 0)
+        self.assertIn("Cancel it yourself in Kite first", text)
+        self.assertNotIn("cancel_order", text)
+        self.run_risk(now="2026-10-19 15:05")
+        code, text, _ = run(self.args("show", now="2026-10-19 15:05"))
+        self.assertIn("First cancel the open stop-loss order for DEMO yourself in Kite", text)
+        self.assertIn("YOU place this exact order in Kite", text)
+
+    def test_order_route_and_match_refusals(self):
+        self.live("telepathy")
+        self.run_risk()
+        code, _, err = run(self.args("show"))
+        self.assertEqual(code, 1)
+        self.assertIn("order_route in the config is manual or kite_mcp", err)
+        shutil.copy(CFG_PATH, self.cfg)                    # paper again
+        code, _, err = run(self.args("match", "--index", "1"))
+        self.assertEqual(code, 1)
+        self.assertIn("this is a paper account", err)
+        self.live("manual")
+        code, _, err = run(self.args("match", "--index", "1"))
+        self.assertEqual(code, 1)
+        self.assertIn("no yes recorded today", err)
+        code, _, err = run(self.args("match", "--index", "1", "--leg", "stop"))
+        self.assertEqual(code, 1)
+        self.assertIn("match the buy first", err)
 
     def test_a_failed_stop_says_to_fix_it(self):
         self.buy_and_fill()

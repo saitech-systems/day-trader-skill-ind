@@ -724,8 +724,8 @@ def cmd_logout(a):
 
 def cmd_quote(a):
     now = parse_now(a.now)
-    sess = need_session(a, now)
     syms = [nse_symbol(s) for s in a.symbols]
+    sess = need_session(a, now)
     q = kite_quotes(sess, syms)
     if show_json(a, {s: dict(v, time=iso_z(v["time"]) if v.get("time") else None) for s, v in q.items()}):
         return 0 if q else 1
@@ -757,13 +757,16 @@ def cmd_quote(a):
 
 def cmd_candles(a):
     now = parse_now(a.now)
-    sess = need_session(a, now)
     sym = nse_symbol(a.symbol)
     days = a.days if a.days is not None else DEFAULT_DAYS[a.interval]
     if days < 0 or days > MAX_DAYS[a.interval]:
         raise KiteError("Kite gives at most %d days of %s candles in one request; --days %d is too many"
                         % (MAX_DAYS[a.interval], a.interval, days))
-    end = datetime.date.fromisoformat(a.to) if a.to else to_ist(now).date()
+    try:
+        end = datetime.date.fromisoformat(a.to) if a.to else to_ist(now).date()
+    except ValueError:
+        raise KiteError("--to wants a date like 2026-10-19, not %r" % a.to)
+    sess = need_session(a, now)
     start = end - datetime.timedelta(days=days)
     text = kite_chart(sess, sym, a.interval, start.isoformat(), end.isoformat(), now_utc=now)
     doc = json.loads(text)

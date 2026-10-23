@@ -964,9 +964,10 @@ def cmd_match(a):
     what = leg_words(want)
     if not found:
         if early:
+            last = max(early, key=lambda r: kite_time(r.get("order_timestamp")))
             print("Not matched: Kite's order %s (%s) was placed at %s, before your yes at %s. An order only "
-                  "counts after the yes." % (early[0].get("order_id"), what,
-                                             to_ist(kite_time(early[0].get("order_timestamp"))).strftime("%H:%M:%S"),
+                  "counts after the yes." % (last.get("order_id"), what,
+                                             to_ist(kite_time(last.get("order_timestamp"))).strftime("%H:%M:%S"),
                                              to_ist(yes_at).strftime("%H:%M:%S")))
         else:
             print("No order in Kite's order book is %s%s. Did you place it, and run kite.py orders --write after? "
