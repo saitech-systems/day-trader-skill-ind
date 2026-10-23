@@ -26,6 +26,7 @@ import urllib.error
 from contextlib import redirect_stdout, redirect_stderr
 
 from _load import load, FIX, ROOT
+from _kite import FakeKite, KDIR
 
 entry = load("trader-entry", "entry")
 
@@ -645,6 +646,174 @@ class Cli(unittest.TestCase):
         self.assertEqual(json.loads(text)[0]["result"]["status"], "waiting")
         code, _, err = run(["watchlist", "--watchlist", "missing.json"])
         self.assertIn("run /trader-scanner first", err)
+
+
+class KiteSource(unittest.TestCase):
+    """The user's own Kite Connect, read only: the FakeKite answers from the same
+    synthetic DEMO bars (tests/fixtures/shared/kite/), and Yahoo must not be called."""
+
+    TOKEN = "demo_access_token"
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.d)
+        self.env = {k: os.environ.pop(k) for k in ("KITE_API_KEY", "KITE_ACCESS_TOKEN") if k in os.environ}
+        self.saved = (entry.kite_urlopen, entry._open_url, entry._sleep, entry.KITE_PAUSE)
+        self.fake = FakeKite().install(entry)
+        self.yahoo = []
+        with open(DEMO) as fh:
+            body = fh.read()
+
+        def yahoo(url, timeout=20):
+            self.yahoo.append(url)
+            return body
+        entry._open_url = yahoo
+        entry._sleep = lambda s: None
+        entry.KITE_PAUSE = 0
+
+    def tearDown(self):
+        entry.kite_urlopen, entry._open_url, entry._sleep, entry.KITE_PAUSE = self.saved
+        os.environ.update(self.env)
+        os.chdir(self.cwd)
+        shutil.rmtree(self.d)
+
+    def login(self, days_ago=0):
+        """A session saved the way trader-broker/kite.py saves it, logged in a minute ago (or days ago)."""
+        when = entry.to_ist(entry.utc_now()) - datetime.timedelta(days=days_ago, minutes=1)
+        FakeKite.session_file(self.d, login_ist=when)
+
+    def check(self, *args):
+        return run(["check", "DEMO", "--now", "2026-10-19 10:00"] + list(args))
+
+    def test_kite_gives_the_same_trigger_as_yahoo(self):
+        self.login()
+        code, text, err = self.check("--json")
+        self.assertEqual(code, 0, err)
+        res = json.loads(text)
+        yahoo = at("2026-10-19 10:00")
+        self.assertEqual(res["source"], "kite")
+        for k in ("time", "price", "bar_index", "bar_start", "pct_over"):
+            self.assertEqual(res["trigger"][k], yahoo["trigger"][k], k)
+        self.assertEqual((res["trigger"]["time"], res["trigger"]["price"], res["trigger"]["bar_index"]),
+                         ("10:00 AM", 1366.4, 8))
+        self.assertEqual(res["opening_range"], yahoo["opening_range"])
+        self.assertEqual(res["prev_close"], 1352.4)           # from Kite's quote
+        self.assertEqual(self.fake.methods(), {"GET"})        # read only
+        self.assertEqual(self.fake.paths(), ["/instruments/NSE", "/instruments/historical/9000001/5minute",
+                                             "/quote"])
+        self.assertEqual(self.yahoo, [])
+        _, url, headers = self.fake.requests[1]
+        self.assertIn("from=2026-10-19+09%3A00%3A00&to=2026-10-19+16%3A00%3A00", url)
+        self.assertEqual(headers.get("X-kite-version"), "3")
+        self.assertEqual(headers.get("Authorization"), "token demo_api_key:" + self.TOKEN)
+
+    def test_the_text_names_the_source(self):
+        self.login()
+        code, text, _ = self.check("--write")
+        self.assertEqual(code, 0)
+        self.assertIn("on 5-minute bars (Kite, live)", text.splitlines()[0])
+        self.assertIn("TRIGGERED 10:00 AM at 1366.40", text)
+        with open(os.path.join("trader", "entry.json")) as fh:
+            self.assertEqual(json.load(fh)["source"], "kite")
+        code, text, _ = run(["check", "DEMO", "--now", "2026-10-19 10:00", "--offline", DEMO])
+        self.assertIn("(Yahoo, free, can lag)", text.splitlines()[0])
+
+    def test_min_volume_on_kite_bars(self):
+        self.login()
+        code, text, _ = run(["check", "DEMO", "--now", "2026-10-19 10:35", "--min-volume-x", "1", "--json"])
+        t = json.loads(text)["trigger"]
+        self.assertEqual((t["time"], t["price"], t["bar_index"]), ("10:30 AM", 1371.6, 14))
+
+    def test_the_forming_kite_candle_waits_for_its_close(self):
+        self.login()
+        code, text, _ = run(["check", "DEMO", "--now", "2026-10-19 09:58", "--json"])
+        res = json.loads(text)
+        self.assertEqual((code, res["status"]), (1, "waiting"))
+        self.assertEqual(res["forming"]["bar_start"], "09:55")
+
+    def test_the_token_never_shows(self):
+        self.login()
+        with open(os.path.join("trader", "watchlist.json"), "w") as fh:
+            json.dump({"hits": [{"symbol": "DEMO"}, {"symbol": "ZZZZ"}]}, fh)
+        outs = [self.check("--write"), self.check("--json"),
+                run(["watchlist", "--now", "2026-10-19 10:00"]),
+                run(["watch", "DEMO", "--now", "2026-10-19 09:50", "--out", os.path.join("trader", "w.json")])]
+        for code, text, err in outs:
+            self.assertNotIn(self.TOKEN, text + err)
+        for name in ("entry.json", "w.json"):
+            with open(os.path.join("trader", name)) as fh:
+                self.assertNotIn(self.TOKEN, fh.read())
+
+    def test_watch_replays_on_kite(self):
+        self.login()
+        code, text, err = run(["watch", "DEMO", "--now", "2026-10-19 09:50", "--out", "e.json"])
+        self.assertEqual(code, 0, err)
+        self.assertIn("TRIGGER", text)
+        with open("e.json") as fh:
+            e = json.load(fh)
+        self.assertEqual((e["time"], e["price"], e["source"]), ("10:00 AM", 1366.4, "kite"))
+        self.assertEqual(self.fake.methods(), {"GET"})
+        self.assertEqual(self.yahoo, [])
+
+    def test_watchlist_on_kite(self):
+        self.login()
+        with open(os.path.join("trader", "watchlist.json"), "w") as fh:
+            json.dump({"hits": [{"symbol": "DEMO"}, {"symbol": "ZZZZ"}]}, fh)
+        code, text, _ = run(["watchlist", "--now", "2026-10-19 10:00"])
+        self.assertEqual(code, 0)
+        self.assertIn("DEMO        triggered  10:00 AM  1366.40", text)
+        self.assertIn("ZZZZ        error: Kite has no NSE equity called ZZZZ", text)
+        self.assertIn("Kite bars, live. Nothing was placed.", text)
+
+    def test_an_old_session_falls_back_to_yahoo_and_says_so(self):
+        self.login(days_ago=2)                     # Zerodha ended it at 6:00 AM the next day
+        code, text, err = self.check()
+        self.assertEqual(code, 0, err)
+        self.assertTrue(text.startswith("Note: no Kite session today, so free Yahoo data"), text)
+        self.assertEqual(text.count("no Kite session today"), 1)
+        self.assertIn("(Yahoo, free, can lag)", text)
+        self.assertEqual(len(self.yahoo), 1)
+        self.assertEqual(self.fake.requests, [])
+        code, text, _ = self.check("--json")
+        self.assertIn("no Kite session today", json.loads(text)["source_note"])
+
+    def test_source_kite_without_a_session_is_refused(self):
+        code, text, err = self.check("--source", "kite")
+        self.assertEqual(code, 1)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertIn("entry.py: no Kite session for today: log in first (python3 trader-broker/kite.py login)", err)
+        self.assertEqual((self.fake.requests, self.yahoo), ([], []))
+
+    def test_yahoo_by_choice_or_by_config(self):
+        self.login()
+        code, text, _ = self.check("--source", "yahoo")
+        self.assertIn("(Yahoo, free, can lag)", text)
+        with open(os.path.join("trader", "config.json"), "w") as fh:
+            json.dump({"data_source": "yahoo"}, fh)
+        code, text, _ = self.check()
+        self.assertIn("(Yahoo, free, can lag)", text)
+        self.assertNotIn("Note:", text)
+        self.assertEqual((len(self.yahoo), self.fake.requests), (2, []))
+        code, text, _ = self.check("--source", "kite")        # the flag wins over the config
+        self.assertIn("(Kite, live)", text)
+
+    def test_offline_wins_over_kite(self):
+        self.login()
+        code, text, _ = self.check("--offline", DEMO)
+        self.assertEqual(code, 0)
+        self.assertEqual((self.fake.requests, self.yahoo), ([], []))
+
+    def test_a_refused_session_is_one_plain_line(self):
+        self.login()
+        self.fake.fail["/instruments"] = (403, os.path.join(KDIR, "error-token-synthetic.json"))
+        code, text, err = self.check()
+        self.assertEqual(code, 1)
+        self.assertEqual(len(err.strip().splitlines()), 1, err)
+        self.assertIn("entry.py: Kite refused the session (TokenException: Incorrect `api_key` or "
+                      "`access_token`.). Log in again: python3 trader-broker/kite.py login", err)
+        self.assertNotIn("Traceback", err)
+        self.assertNotIn(self.TOKEN, err)
 
 
 class SkillDoc(unittest.TestCase):

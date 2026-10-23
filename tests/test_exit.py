@@ -2,6 +2,7 @@
 tests/fixtures/shared/ (a made-up NSE stock, not market data; see test_entry.py
 and tests/fixtures/make_synthetic.py)."""
 
+import datetime
 import io
 import json
 import os
@@ -12,6 +13,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from decimal import Decimal
 
 from _load import load, FIX, ROOT
+from _kite import FakeKite, KDIR
 
 exitp = load("trader-exit", "exit")
 entry = load("trader-entry", "entry")
@@ -320,6 +322,128 @@ class Cli(unittest.TestCase):
         code, text, _ = run(exitp, ["show"])
         self.assertEqual(code, 1)
         self.assertIn("No plan", text)
+
+
+class KiteSource(unittest.TestCase):
+    """The user's own Kite Connect, read only, through FakeKite (the synthetic DEMO bars)."""
+
+    TOKEN = "demo_access_token"
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.d)
+        os.mkdir("trader")
+        with open(os.path.join("trader", "entry.json"), "w") as fh:
+            json.dump(STORY_ENTRY, fh)
+        self.env = {k: os.environ.pop(k) for k in ("KITE_API_KEY", "KITE_ACCESS_TOKEN") if k in os.environ}
+        self.saved = (exitp.kite_urlopen, exitp.yahoo_get, exitp.KITE_PAUSE)
+        self.fake = FakeKite().install(exitp)
+        self.yahoo = []
+
+        def yahoo(path):
+            self.yahoo.append(path)
+            with open(DEMO) as fh:
+                return fh.read()
+        exitp.yahoo_get = yahoo
+        exitp.KITE_PAUSE = 0
+
+    def tearDown(self):
+        exitp.kite_urlopen, exitp.yahoo_get, exitp.KITE_PAUSE = self.saved
+        os.environ.update(self.env)
+        os.chdir(self.cwd)
+        shutil.rmtree(self.d)
+
+    def login(self, days_ago=0):
+        when = exitp.to_ist(exitp.utc_now()) - datetime.timedelta(days=days_ago, minutes=1)
+        FakeKite.session_file(self.d, login_ist=when)
+
+    def plan(self, *args):
+        return run(exitp, ["plan", "--now", "2026-10-19 10:00"] + list(args))
+
+    def instruments(self, tick):
+        """Kite's instrument list with DEMO on another tick (NSE assigns a tick per stock)."""
+        path = os.path.join(self.d, "instruments.csv")
+        with open(os.path.join(KDIR, "instruments-NSE-synthetic.csv")) as fh:
+            rows = fh.read().splitlines()
+        rows = [r.replace(",0.1,1,EQ,", ",%s,1,EQ," % tick) if ",DEMO," in r else r for r in rows]
+        with open(path, "w") as fh:
+            fh.write("\n".join(rows) + "\n")
+        return path
+
+    def test_an_atr_stop_on_kite_bars_matches_yahoo(self):
+        code, text, err = self.plan("--stop", "atr:1.5", "--offline", DEMO, "--json")
+        offline = json.loads(text)
+        self.login()
+        code, text, err = self.plan("--stop", "atr:1.5", "--json")
+        self.assertEqual(code, 0, err)
+        p = json.loads(text)
+        for k in ("stop", "target", "risk_per_share", "atr", "atr_bars", "tick"):
+            self.assertEqual(p[k], offline[k], k)
+        self.assertEqual((p["stop"], p["risk_per_share"], p["target"]), (1358.7, 7.7, 1381.8))
+        self.assertEqual((p["tick_source"], p["bars_source"]), ("kite", "kite"))
+        self.assertEqual((offline["tick_source"], offline["bars_source"]), ("price band", "offline"))
+        self.assertEqual(self.fake.methods(), {"GET"})
+        self.assertEqual(self.fake.paths(), ["/instruments/NSE", "/instruments/historical/9000001/5minute"])
+        self.assertEqual(self.yahoo, [])
+
+    def test_kites_own_tick_for_the_stock(self):
+        self.login()
+        self.fake.instruments = self.instruments("0.05")
+        code, text, err = self.plan("--target", "1R", "--json")
+        self.assertEqual(code, 0, err)
+        p = json.loads(text)
+        # (1363.80 + 1351.30) / 2 = 1357.55 sits on a 0.05 grid: no rounding down to 1357.50
+        self.assertEqual((p["tick"], p["tick_source"], p["stop"], p["target"]), (0.05, "kite", 1357.55, 1375.25))
+        self.assertNotIn("bars_source", p)
+        self.assertEqual(self.fake.paths(), ["/instruments/NSE"])
+        code, text, _ = self.plan("--target", "1R")
+        self.assertIn("(1363.80 + 1351.30) / 2 = 1357.55", text)
+        self.assertEqual(self.fake.paths(), ["/instruments/NSE"])     # cached for the day
+
+    def test_without_a_session_the_price_band_tick_and_no_kite_call(self):
+        code, text, err = self.plan("--target", "1R", "--json")
+        self.assertEqual(code, 0, err)
+        p = json.loads(text)
+        self.assertEqual((p["tick"], p["tick_source"], p["stop"]), (0.1, "price band", 1357.5))
+        self.assertEqual(p["warnings"], [])          # no bars were read, so no data note
+        self.assertEqual((self.fake.requests, self.yahoo), ([], []))
+
+    def test_an_atr_stop_without_a_session_says_yahoo(self):
+        self.login(days_ago=2)
+        code, text, err = self.plan("--stop", "atr:1.5")
+        self.assertEqual(code, 0, err)
+        self.assertIn("Note: No Kite session today, so free Yahoo data", text)
+        self.assertEqual((len(self.yahoo), self.fake.requests), (1, []))
+
+    def test_source_kite_without_a_session_is_refused(self):
+        code, text, err = self.plan("--source", "kite")
+        self.assertEqual(code, 1)
+        self.assertEqual(err.strip(), "exit.py: no Kite session for today: log in first "
+                                      "(python3 trader-broker/kite.py login), or use --source yahoo")
+
+    def test_a_refused_session(self):
+        self.login()
+        self.fake.fail["/instruments"] = (403, os.path.join(KDIR, "error-token-synthetic.json"))
+        code, text, err = self.plan("--stop", "atr:1.5")       # bars are needed: one plain line
+        self.assertEqual(code, 1)
+        self.assertEqual(len(err.strip().splitlines()), 1)
+        self.assertIn("exit.py: Kite refused the session (TokenException", err)
+        code, text, err = self.plan("--json")                  # only the tick: the price band, with a note
+        self.assertEqual(code, 0, err)
+        p = json.loads(text)
+        self.assertEqual((p["tick_source"], p["stop"]), ("price band", 1357.5))
+        self.assertTrue(any("Kite's instrument list did not load" in w for w in p["warnings"]))
+        for t in (text, err):
+            self.assertNotIn(self.TOKEN, t)
+
+    def test_the_token_never_shows(self):
+        self.login()
+        for args in (("--stop", "atr:1.5", "--write"), ("--json",)):
+            code, text, err = self.plan(*args)
+            self.assertNotIn(self.TOKEN, text + err)
+        with open(os.path.join("trader", "plan.json")) as fh:
+            self.assertNotIn(self.TOKEN, fh.read())
 
 
 class SkillDoc(unittest.TestCase):

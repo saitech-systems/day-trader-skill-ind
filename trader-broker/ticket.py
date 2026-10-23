@@ -5,7 +5,7 @@ This tool never talks to a broker and never places anything. It does its
 work around the one moment that matters, your yes:
 
   show      renders each proposed order as a plain-English ticket plus the
-            exact JSON Claude would send to Zerodha Kite's place_order tool.
+            exact order, field by field, as Kite's place_order takes it.
             An entry shows its two calls: the LIMIT buy, then (only after it
             fills) its stop-loss SL sell; the target, which is watched and not
             sent; and the max loss at the stop with charges. An order is READY
@@ -15,9 +15,13 @@ work around the one moment that matters, your yes:
             word. It refuses "yes to all", "sure", "ok", a yes that names a
             different stock or amount, and any order that is not READY.
   decline   records a no.
-  result    records what happened after the Allow once / Deny card: placed
-            (with Zerodha's order id), denied, or failed; --leg stop for the
-            stop-loss order. In a paper account it records the paper order.
+  result    records what happened: placed (with Zerodha's order id), denied,
+            or failed; --leg stop for the stop-loss order. In a paper account
+            it records the paper order.
+  match     reads Kite's order book (kite.py orders --write saves it) and
+            records the order you placed yourself in Kite for this ticket:
+            COMPLETE is placed and filled, OPEN or TRIGGER PENDING is placed,
+            REJECTED or CANCELLED failed. --leg stop for its stop-loss.
   fill      records a fill in trader/portfolio.json (cash and shares).
   flatten   builds a sell ticket that closes a symbol's position by flat_by:
             a marketable LIMIT from a fresh price, else MARKET. It still goes
@@ -30,13 +34,23 @@ work around the one moment that matters, your yes:
     python3 ticket.py approve --index 1 --reply "yes"
     python3 ticket.py result --index 1 --status placed --broker-id 261019000123456
     python3 ticket.py result --index 1 --leg stop --status placed --broker-id 261019000123999
+    python3 ticket.py match --index 1                # after kite.py orders --write
+    python3 ticket.py match --index 1 --leg stop
     python3 ticket.py fill --symbol DEMO --side buy --qty 54 --price 1366.40
     python3 ticket.py flatten --symbol DEMO --qty 54 --price 1371.20
     python3 ticket.py log
 
 Paper (the default, "paper": true): Claude calls no Kite tool at all. After
 your yes the order is recorded as a paper order and filled at the price the
-market gives (Kite get_ltp or trader-alerts' quote).
+market gives (kite.py quote, Kite get_ltp or trader-alerts' quote).
+
+Live ("paper": false) goes one of two ways, "order_route" in the config:
+  manual    (the default) you place the exact order yourself in Kite, the app
+            or kite.zerodha.com, after your yes; then kite.py orders --write
+            and ticket.py match record it from Kite's order book. Nothing is
+            ever sent for you: placing it by hand is the last check.
+  kite_mcp  Claude calls place_order on your self-hosted Kite MCP server, and
+            Claude's own Allow once / Deny card asks you before each call.
 
 Everything is written to trader/state/broker.json (append only). Dates are
 India dates; --now "2026-10-19 10:00" pins the clock.
@@ -63,6 +77,9 @@ FRESH_MINUTES = 15
 DEFAULT_FLAT_BY = "15:05"
 DEFAULT_EXIT_BUFFER = 0.5
 CANCEL_FIRST = "the open stop-loss order for %s (get_orders: status TRIGGER PENDING), cancel_order it first"
+ROUTES = ("manual", "kite_mcp")
+KITE_ORDERS = "trader/state/kite-orders.json"
+KITE_FILLED, KITE_DEAD = "COMPLETE", ("REJECTED", "CANCELLED")
 
 
 class TicketError(Exception):
@@ -463,7 +480,16 @@ def risk_verdict(risk, fp, today):
     return None, "this exact order was not in the last risk check (it changed or is new); run check.py again"
 
 
-def status_of(order, risk, state, today):
+def route_of(cfg):
+    """How a live order reaches Zerodha: "manual" (you place it in Kite, the
+    default) or "kite_mcp" (Claude calls place_order behind its Allow once card)."""
+    r = str((cfg or {}).get("order_route") or "manual").strip().lower()
+    if r not in ROUTES:
+        raise TicketError("order_route in the config is manual or kite_mcp, not %r" % r)
+    return r
+
+
+def status_of(order, risk, state, today, route="kite_mcp"):
     """(ready, label, risk_result)"""
     fp = fingerprint(order)
     rv, why = risk_verdict(risk, fp, today)
@@ -475,7 +501,9 @@ def status_of(order, risk, state, today):
     if rec:
         st = rec.get("status")
         if st == "approved":
-            return False, "APPROVED by you at %s, waiting for the place_order call" % rec.get("at"), rv
+            wait = ("waiting for you to place it in Kite (then kite.py orders --write, ticket.py match)"
+                    if route == "manual" else "waiting for the place_order call")
+            return False, "APPROVED by you at %s, %s" % (rec.get("at"), wait), rv
         label = "DONE: %s at %s" % (st, rec.get("at"))
         if st == "placed" and isinstance(order.get("stop_order"), dict):
             leg = latest(state, fp, today, "stop")
@@ -499,8 +527,9 @@ def _json_lines(doc, indent="    "):
 
 
 def render(order, idx, total, cfg, risk, state, today):
-    ready, label, rv = status_of(order, risk, state, today)
     paper = cfg.get("paper", True)
+    route = route_of(cfg)
+    ready, label, rv = status_of(order, risk, state, today, "paper" if paper else route)
     acct = "PAPER account (nothing is sent to Zerodha)" if paper else "LIVE ACCOUNT, REAL MONEY, Zerodha (Kite)"
     lines = ["ORDER %d of %d, %s" % (idx, total, acct)]
     for part in plain_parts(order):
@@ -522,6 +551,23 @@ def render(order, idx, total, cfg, risk, state, today):
         if so:
             lines.append("  and its stop-loss, after the fill:")
             lines.extend(_json_lines(so))
+    elif route == "manual":
+        if order.get("cancel_first"):
+            lines.append("  First cancel the open stop-loss order for %s yourself in Kite (Orders: the TRIGGER "
+                         "PENDING sell)." % order.get("tradingsymbol"))
+        lines.append("  After your yes, YOU place this exact order in Kite (the app or kite.zerodha.com); Claude")
+        lines.append("  does not place it:")
+        lines.append("    " + leg_words(order))
+        lines.append("  field by field, as Kite names them:")
+        lines.extend(_json_lines(tool_input(order)))
+        if so:
+            lines.append("  Once it is COMPLETE in Kite's order book, place its stop-loss yourself the same way:")
+            lines.append("    " + leg_words(so))
+            lines.extend(_json_lines(so))
+            lines.append("  One yes covers both: the stop-loss only sells the shares this order buys. Never place it")
+            lines.append("  before the buy fills: a triggered stop with no shares would open a short.")
+        lines.append("  Then: kite.py orders --write, and ticket.py match --index %d%s records them." % (
+            idx, " (and --leg stop)" if so else ""))
     else:
         if order.get("cancel_first"):
             lines.append("  First cancel %s (cancel_order, variety regular, its order_id)." % order["cancel_first"])
@@ -535,16 +581,20 @@ def render(order, idx, total, cfg, risk, state, today):
             lines.append("  never placed before the buy fills: a triggered stop with no shares would open a short.")
     if ready:
         lines.append("  Reply \"yes\" to place this one order, or \"no\" to skip it.")
-        if not paper:
+        if not paper and route == "manual":
+            lines.append("  Then you place it in Kite by hand: that is the last check, and nothing is sent for you.")
+        elif not paper:
             lines.append("  Claude's own card then asks again before each Kite call: Allow once places it, Deny stops it.")
     return "\n".join(lines), ready
 
 
 def ticket_json(order, idx, cfg, risk, state, today):
-    ready, label, rv = status_of(order, risk, state, today)
+    paper = bool(cfg.get("paper", True))
+    route = route_of(cfg)
+    ready, label, rv = status_of(order, risk, state, today, "paper" if paper else route)
     loss, stop, charges = max_loss(order)
     return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
-            "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
+            "fingerprint": fingerprint(order), "paper": paper, "order_route": "paper" if paper else route,
             "broker": cfg.get("broker", "zerodha"), "tool": "place_order",
             "tool_input": tool_input(order), "stop_input": stop_input(order),
             "target_price": order.get("target_price"), "cancel_first": order.get("cancel_first"),
@@ -602,7 +652,7 @@ def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date):
     return pf
 
 
-def log_fill(state_path, now, today, symbol, side, qty, price, paper=None):
+def log_fill(state_path, now, today, symbol, side, qty, price, paper=None, broker_id=None):
     """A fill in the log, so trader-risk and the log can see it."""
     state = load_state(state_path)
     rec = {"at": ist_iso(now), "date": today, "status": "filled", "symbol": symbol.upper(), "side": side,
@@ -610,6 +660,8 @@ def log_fill(state_path, now, today, symbol, side, qty, price, paper=None):
            "plain": "%s %s %s at %s" % (side.upper(), _str_num(float(qty)), symbol.upper(), _p(price))}
     if paper is not None:
         rec["paper"] = bool(paper)
+    if broker_id:
+        rec["broker_order_id"] = str(broker_id)
     state.setdefault("orders", []).append(rec)
     write_json(state_path, state)
 
@@ -665,7 +717,9 @@ def cmd_show(a):
 def cmd_approve(a):
     orders, cfg, risk, state, today, now = _load(a)
     order = _pick(orders, a.index)
-    ready, label, rv = status_of(order, risk, state, today)
+    paper = bool(cfg.get("paper", True))
+    route = route_of(cfg)
+    ready, label, rv = status_of(order, risk, state, today, "paper" if paper else route)
     if not ready:
         raise TicketError("order %d is not ready: %s" % (a.index, label))
     ok, why = parse_yes(a.reply, order, [o.get("tradingsymbol", "") for o in orders])
@@ -673,12 +727,13 @@ def cmd_approve(a):
         print("Not recorded: %s. Ask the user again with the ticket for order %d." % (why, a.index))
         return 1
     loss, stop, charges = max_loss(order)
-    paper = bool(cfg.get("paper", True))
     rec = {"at": ist_iso(now), "date": today, "index": a.index, "fingerprint": fingerprint(order),
            "symbol": str(order.get("tradingsymbol", "")).upper(),
            "side": str(order.get("transaction_type", "")).lower(), "qty": order.get("quantity"),
            "kind": kind_of(order, rv), "max_loss": loss, "stop": stop, "plain": plain(order),
            "status": "approved", "reply": a.reply, "paper": paper, "broker": cfg.get("broker", "zerodha")}
+    if not paper:
+        rec["route"] = route
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
     print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
@@ -690,6 +745,18 @@ def cmd_approve(a):
         if stop_input(order):
             print("The stop-loss is a paper order too: ticket.py result --index %d --leg stop --status placed, "
                   "and trader-alerts watches it (alerts.py add --from-plan)." % a.index)
+        return 0
+    if route == "manual":
+        if order.get("cancel_first"):
+            print("First cancel the open stop-loss order for %s yourself in Kite (Orders: the TRIGGER PENDING sell)."
+                  % order.get("tradingsymbol"))
+        print("Now place exactly this order yourself in Kite (the app or kite.zerodha.com). Claude does not place it:")
+        print("  " + leg_words(order))
+        print("When it shows in Kite's order book: kite.py orders --write, then ticket.py match --index %d." % a.index)
+        if stop_input(order):
+            print("Once the buy is COMPLETE, place its stop-loss yourself the same way:")
+            print("  " + leg_words(stop_input(order)))
+            print("and record it: kite.py orders --write, then ticket.py match --index %d --leg stop." % a.index)
         return 0
     if order.get("cancel_first"):
         print("First cancel %s (cancel_order: variety regular, its order_id; Needs approval)."
@@ -772,11 +839,209 @@ def cmd_result(a):
         if paper:
             print("Paper stop-loss: ticket.py result --index %d --leg stop --status placed (nothing is sent)."
                   % a.index)
+        elif route_of(cfg) == "manual":
+            print("Once the buy is COMPLETE in Kite, place its stop-loss yourself: %s. Then kite.py orders --write "
+                  "and ticket.py match --index %d --leg stop." % (leg_words(so), a.index))
         else:
             print("Once the buy shows COMPLETE in get_orders, place the stop-loss: place_order with exactly:")
             print(json.dumps(so, indent=2))
             print("then: ticket.py result --index %d --leg stop --status placed --broker-id ID" % a.index)
         print("When the stop-loss fills, or you exit at the target, record that sell: ticket.py fill.")
+    return 0
+
+
+# ---------------------------------------------------------------- match: Kite's order book -> the log
+
+def kite_book(path, today):
+    """Today's orders from the file kite.py orders --write saves."""
+    doc = read_json(path, "Kite order book (run kite.py orders --write first)")
+    if not isinstance(doc, dict) or not isinstance(doc.get("orders"), list):
+        raise TicketError("%s is not an order book kite.py wrote" % path)
+    if doc.get("date") != today:
+        raise TicketError("%s is from %s, not today: run kite.py orders --write again" % (path, doc.get("date")))
+    return doc["orders"]
+
+
+def kite_time(text):
+    """"2026-10-19 10:01:05" (India time) -> naive UTC, or None."""
+    try:
+        return ist_to_utc(datetime.datetime.strptime(str(text)[:19], "%Y-%m-%d %H:%M:%S"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _same_price(got, want):
+    g, w = _f(got), _f(want)
+    if g is None or w is None:
+        return g is None and w is None
+    return abs(g - w) <= float(tick_size(w)) / 2 + 1e-9
+
+
+def is_this_order(row, want):
+    """Is Kite's order row the order the ticket asked for? Every field that matters,
+    prices within half a tick."""
+    for k in ("exchange", "tradingsymbol", "transaction_type", "product", "order_type"):
+        if str(row.get(k) or "").upper() != str(want.get(k) or "").upper():
+            return False
+    if str(row.get("variety") or "regular").lower() != str(want.get("variety") or "regular").lower():
+        return False
+    if _f(row.get("quantity")) is None or int(_f(row["quantity"])) != int(want.get("quantity") or 0):
+        return False
+    typ = str(want.get("order_type") or "").upper()
+    if typ in ("LIMIT", "SL") and not _same_price(row.get("price"), want.get("price")):
+        return False
+    if typ in ("SL", "SL-M") and not _same_price(row.get("trigger_price"), want.get("trigger_price")):
+        return False
+    return True
+
+
+def outcome(row):
+    """(what happened, filled qty, average price): filled, partial, open or failed."""
+    st = str(row.get("status") or "").upper()
+    q = _f(row.get("filled_quantity")) or 0
+    avg = _f(row.get("average_price")) or 0
+    if st == KITE_FILLED:
+        return "filled", q or _f(row.get("quantity")) or 0, avg
+    if st in KITE_DEAD:
+        return ("partial" if q > 0 else "failed"), q, avg
+    return "open", 0, 0
+
+
+def fill_logged(state, broker_id):
+    return any(r.get("status") == "filled" and r.get("broker_order_id") == str(broker_id)
+               for r in state.get("orders", []))
+
+
+def cmd_match(a):
+    orders, cfg, risk, state, today, now = _load(a)
+    order = _pick(orders, a.index)
+    if cfg.get("paper", True):
+        raise TicketError("this is a paper account: nothing went to Zerodha, so there is nothing to match. "
+                          "Record paper orders with ticket.py result")
+    fp = fingerprint(order)
+    entry = latest(state, fp, today)
+    leg = "stop" if a.leg == "stop" else None
+    if leg:
+        want = stop_input(order)
+        if not want:
+            raise TicketError("order %d has no stop-loss order" % a.index)
+        if not entry or entry.get("status") != "placed":
+            raise TicketError("order %d's buy is not recorded as placed today: match the buy first (ticket.py match "
+                              "--index %d); the stop-loss goes in only after it fills" % (a.index, a.index))
+        mine = latest(state, fp, today, "stop")
+    else:
+        want = tool_input(order)
+        if not entry or entry.get("status") not in ("approved", "placed"):
+            raise TicketError("order %d has no yes recorded today: the yes comes before you place it in Kite"
+                              % a.index)
+        mine = entry if entry.get("status") == "placed" else None
+    yes = None
+    for rec in state.get("orders", []):
+        if rec.get("fingerprint") == fp and rec_day(rec) == today and rec.get("status") == "approved":
+            yes = rec
+    yes_at = parse_utc(yes.get("at")) if yes else None
+    rows = kite_book(a.kite_orders, today)
+    used = {str(r.get("broker_order_id")) for r in state.get("orders", [])
+            if r.get("broker_order_id") and r.get("status") in ("placed", "failed")}
+    if mine and mine.get("broker_order_id"):
+        used.discard(str(mine["broker_order_id"]))
+    found, early = [], []
+    for row in rows:
+        if not is_this_order(row, want):
+            continue
+        oid = str(row.get("order_id"))
+        if mine and mine.get("broker_order_id") and oid != str(mine["broker_order_id"]):
+            continue
+        if oid in used:
+            continue
+        t = kite_time(row.get("order_timestamp"))
+        if yes_at and t and t < yes_at:
+            early.append(row)
+            continue
+        found.append(row)
+    if a.order_id:
+        found = [r for r in found if str(r.get("order_id")) == str(a.order_id)]
+    what = leg_words(want)
+    if not found:
+        if early:
+            print("Not matched: Kite's order %s (%s) was placed at %s, before your yes at %s. An order only "
+                  "counts after the yes." % (early[0].get("order_id"), what,
+                                             to_ist(kite_time(early[0].get("order_timestamp"))).strftime("%H:%M:%S"),
+                                             to_ist(yes_at).strftime("%H:%M:%S")))
+        else:
+            print("No order in Kite's order book is %s%s. Did you place it, and run kite.py orders --write after? "
+                  "An order with any other quantity or price is not this ticket." % (
+                      what, " (stop-loss)" if leg else ""))
+        return 1
+    if len(found) > 1:
+        print("More than one Kite order is %s: %s. Say which: ticket.py match --index %d%s --order-id ID." % (
+            what, ", ".join("%s (%s)" % (r.get("order_id"), r.get("status")) for r in found), a.index,
+            " --leg stop" if leg else ""))
+        return 1
+    row = found[0]
+    oid = str(row.get("order_id"))
+    happened, qty, avg = outcome(row)
+    paper = False
+    side = str(want["transaction_type"]).lower()
+    sym = str(want["tradingsymbol"]).upper()
+    base = {"date": today, "index": a.index, "fingerprint": fp, "symbol": sym, "broker_order_id": oid,
+            "via": "kite order book", "paper": paper}
+    rec_new = None
+    if mine is None or happened == "failed":
+        status = "failed" if happened == "failed" else "placed"
+        rec_new = dict(base, at=ist_iso(now), status=status)
+        if leg:
+            rec_new.update(leg="stop", side=side, plain=leg_words(want))
+        else:
+            rec_new.update(side=entry["side"], plain=entry["plain"])
+            for k in ("qty", "kind", "max_loss", "stop"):
+                if entry.get(k) is not None:
+                    rec_new[k] = entry[k]
+        if happened == "failed" and row.get("status_message"):
+            rec_new["note"] = str(row["status_message"])
+        state["orders"].append(rec_new)
+        write_json(a.state, state)
+    label = "order %d's stop-loss" % a.index if leg else "order %d" % a.index
+    print("Matched Kite order %s: %s, %s." % (oid, str(row.get("status")), what))
+    if happened == "failed":
+        print("Recorded %s as failed%s." % (label, (" (Kite says: %s)" % row["status_message"])
+                                            if row.get("status_message") else ""))
+        if leg:
+            print("The shares have no stop at Zerodha. Fix it now (place the stop-loss again) or sell: "
+                  "ticket.py flatten --symbol %s." % sym)
+        else:
+            print("A failed order is not retried without a new check and a new yes.")
+        return 0
+    if rec_new is not None:
+        print("Recorded %s as placed (broker id %s)." % (label, oid))
+    if happened == "open":
+        if rec_new is None:
+            print("Still %s at Kite: nothing new to record." % row.get("status"))
+        if not leg:
+            print("It has not filled yet. Once it is COMPLETE: kite.py orders --write and ticket.py match --index %d "
+                  "again; place the stop-loss only then." % a.index)
+        return 0
+    if fill_logged(state, oid):
+        print("Its fill (%s at %s) is already recorded." % (_str_num(qty), _p(avg)))
+    else:
+        apply_fill(a.portfolio, cfg, sym, side, qty, avg, today)
+        log_fill(a.state, now, today, sym, side, qty, avg, paper, oid)
+        print("Recorded the fill: %s %s %s at %s, into %s." % (side.upper(), _str_num(qty), sym, _p(avg),
+                                                              a.portfolio))
+    if happened == "partial":
+        print("Kite %s the rest (%s of %s filled)." % (str(row.get("status")).lower(), _str_num(qty),
+                                                      _str_num(want.get("quantity"))))
+    so = stop_input(order)
+    if not leg and so:
+        sq = int(qty)
+        if sq != int(so["quantity"]):
+            print("Only %d shares filled: the stop-loss on the ticket is for %s. Place a stop for the %d you hold "
+                  "after a new check (trader-risk) and a new yes." % (sq, _str_num(so["quantity"]), sq))
+        else:
+            print("Now place its stop-loss yourself in Kite: %s. Then kite.py orders --write and ticket.py match "
+                  "--index %d --leg stop." % (leg_words(so), a.index))
+    elif leg:
+        print("The stop-loss filled: the trade is closed.")
     return 0
 
 
@@ -877,6 +1142,11 @@ def cmd_flatten(a):
     if cfg.get("paper", True):
         print("  3. Paper account: nothing is sent. Record the paper fill: ticket.py result --index 1 --status")
         print("     placed --filled-qty %d --filled-price PRICE." % int(qty))
+    elif route_of(cfg) == "manual":
+        print("  3. The stop-loss SL order still holds these shares at Zerodha. Cancel it yourself in Kite first")
+        print("     (Orders: the TRIGGER PENDING sell), then place the sell exactly as the ticket shows, then")
+        print("     kite.py orders --write and ticket.py match --index 1. Zerodha's own MIS auto square-off comes")
+        print("     later and costs Rs 50 + GST an order.")
     else:
         print("  3. The stop-loss SL order still holds these shares at Zerodha. Cancel it first: get_orders")
         print("     (status TRIGGER PENDING), then cancel_order (variety regular, its order_id; Needs approval).")
@@ -937,7 +1207,7 @@ def main(argv=None):
     common(p)
     p.add_argument("--index", type=int, required=True)
     p.add_argument("--reply")
-    p = sub.add_parser("result", help="record what happened after the Allow once / Deny card")
+    p = sub.add_parser("result", help="record what happened to an order (placed, denied, failed)")
     common(p)
     p.add_argument("--index", type=int, required=True)
     p.add_argument("--leg", choices=["entry", "stop"], default="entry", help="the buy (default) or its stop-loss")
@@ -946,6 +1216,13 @@ def main(argv=None):
     p.add_argument("--note")
     p.add_argument("--filled-qty")
     p.add_argument("--filled-price")
+    p.add_argument("--portfolio", default="trader/portfolio.json")
+    p = sub.add_parser("match", help="record the order you placed in Kite, from Kite's order book")
+    common(p)
+    p.add_argument("--index", type=int, required=True)
+    p.add_argument("--leg", choices=["entry", "stop"], default="entry", help="the buy (default) or its stop-loss")
+    p.add_argument("--order-id", help="Kite's order id, when more than one order matches")
+    p.add_argument("--kite-orders", default=KITE_ORDERS, help="the order book kite.py orders --write saved")
     p.add_argument("--portfolio", default="trader/portfolio.json")
     p = sub.add_parser("fill", help="record a fill in trader/portfolio.json")
     p.add_argument("--symbol", required=True)
@@ -977,7 +1254,7 @@ def main(argv=None):
         return 1
     try:
         return {"show": cmd_show, "approve": cmd_approve, "decline": cmd_decline, "result": cmd_result,
-                "fill": cmd_fill, "flatten": cmd_flatten, "log": cmd_log}[a.cmd](a)
+                "match": cmd_match, "fill": cmd_fill, "flatten": cmd_flatten, "log": cmd_log}[a.cmd](a)
     except TicketError as e:
         print("ticket.py: %s" % e, file=sys.stderr)
         return 1

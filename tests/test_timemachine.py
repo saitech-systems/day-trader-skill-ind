@@ -7,6 +7,7 @@ they prove the replays are repeatable, not that DEMO's odds mean anything.
 """
 
 import copy
+import datetime
 import gzip
 import hashlib
 import io
@@ -20,6 +21,7 @@ import urllib.error
 from contextlib import redirect_stdout, redirect_stderr
 
 from _load import load, FIX
+from _kite import FakeKite, KDIR
 
 tm = load("trader-timemachine", "timemachine")
 
@@ -562,6 +564,123 @@ class Network(unittest.TestCase):
             self.assertEqual(self.calls, ["query2"])
         finally:
             shutil.rmtree(d)
+
+
+class KiteSource(unittest.TestCase):
+    """The user's own Kite Connect, read only, through FakeKite: the same synthetic DEMO bars as
+    Kite candles. The numbers must be the pinned Yahoo numbers, bit for bit."""
+
+    TOKEN = "demo_access_token"
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.cwd = os.getcwd()
+        os.chdir(self.d)
+        os.mkdir("trader")
+        with open(os.path.join("trader", "plan.json"), "w") as fh:
+            json.dump(PLAN, fh)
+        self.env = {k: os.environ.pop(k) for k in ("KITE_API_KEY", "KITE_ACCESS_TOKEN") if k in os.environ}
+        self.saved = (tm.kite_urlopen, tm._get, tm._sleep)
+        self.fake = FakeKite().install(tm)
+        self.yahoo = []
+
+        def yahoo(url, timeout=20):
+            self.yahoo.append(url)
+            return TEXT
+        tm._get = yahoo
+        tm._sleep = lambda s: None
+
+    def tearDown(self):
+        tm.kite_urlopen, tm._get, tm._sleep = self.saved
+        os.environ.update(self.env)
+        os.chdir(self.cwd)
+        shutil.rmtree(self.d)
+
+    def login(self, days_ago=0):
+        when = tm.to_ist(tm.utc_now()) - datetime.timedelta(days=days_ago, minutes=1)
+        FakeKite.session_file(self.d, login_ist=when)
+
+    def test_kite_candles_give_the_pinned_numbers(self):
+        self.login()
+        code, text, err = run(["run", "--now", NOW, "--write"])
+        self.assertEqual(code, 0, err)
+        with open(os.path.join("trader", "timemachine.json")) as fh:
+            doc = json.load(fh)
+        m, h = doc["mc"], doc["history"]
+        self.assertEqual(doc["source"], "kite")
+        self.assertEqual((m["pool_sessions"], m["pool_from"], m["pool_to"], m["bars_left"]),
+                         (59, "2026-07-24", "2026-10-16", 61))
+        self.assertEqual((m["p_target"], m["p_stop"], m["p_neither"], m["p_green"]), (0.5359, 0.4505, 0.0136, 0.5432))
+        self.assertEqual((m["median_close"], m["p5_close"], m["p95_close"], m["avg_R"]), (1369.73, 1343.24, 1397.6, 0.086))
+        self.assertEqual((sha(m["bands"]), sha(m["sample_paths"]), m["hist"]), (SIM_BANDS, SIM_PATHS, SIM_HIST))
+        slim = [{"date": t["date"], "entry": t["entry"], "outcome": t["outcome"], "R": t["R"]} for t in h["trades"]]
+        self.assertEqual((h["triggered"], h["target"], h["stop"], sha(slim)), (47, 23, 21, SIM_TRADES))
+        self.assertEqual(doc["verdict"], "Close to a coin flip: target first 53.6 % vs stop first 45.1 %.")
+        self.assertIn("Bars: Kite, live.", text)
+        self.assertNotIn("Note:", text)
+        self.assertEqual(self.yahoo, [])
+        self.assertEqual(self.fake.methods(), {"GET"})
+        self.assertEqual(self.fake.paths(), ["/instruments/NSE", "/instruments/historical/9000001/5minute"])
+        url = self.fake.requests[1][1]
+        self.assertIn("from=2026-07-24+09%3A00%3A00&to=2026-10-19+16%3A00%3A00", url)   # the same 60 sessions
+
+    def test_sixty_sessions_back_on_the_nse_calendar(self):
+        D = datetime.date
+        self.assertEqual(tm.first_session(D(2026, 10, 19)), D(2026, 7, 24))
+        self.assertEqual(tm.first_session(D(2026, 10, 19), 1), D(2026, 10, 19))
+        self.assertEqual(tm.first_session(D(2026, 10, 21), 2), D(2026, 10, 19))     # Tue 20th is Dussehra
+        self.assertEqual(tm.first_session(D(2026, 10, 19), 3), D(2026, 10, 15))     # over the weekend
+
+    def test_an_old_session_falls_back_to_yahoo_and_says_so(self):
+        self.login(days_ago=2)
+        code, text, err = run(["run", "--now", NOW, "--replays", "300"])
+        self.assertEqual(code, 0, err)
+        self.assertTrue(text.startswith("Note: no Kite session today, so free Yahoo data"), text[:200])
+        self.assertIn("Bars: Yahoo, free, can lag.", text)
+        self.assertEqual((len(self.yahoo), self.fake.requests), (1, []))
+        code, text, err = run(["run", "--now", NOW, "--replays", "300", "--json"])
+        doc = json.loads(text)
+        self.assertEqual(doc["source"], "yahoo")
+        self.assertIn("no Kite session today", doc["source_note"])
+
+    def test_the_config_can_say_yahoo(self):
+        self.login()
+        with open(os.path.join("trader", "config.json"), "w") as fh:
+            json.dump({"data_source": "yahoo"}, fh)
+        code, text, _ = run(["run", "--now", NOW, "--replays", "300"])
+        self.assertIn("Bars: Yahoo, free, can lag.", text)
+        self.assertEqual((len(self.yahoo), self.fake.requests), (1, []))
+
+    def test_offline_wins_and_says_so(self):
+        self.login()
+        code, text, _ = run(["run", "--now", NOW, "--replays", "300", "--offline", DEMO])
+        self.assertIn("Bars: a saved file.", text)
+        self.assertEqual((self.yahoo, self.fake.requests), ([], []))
+
+    def test_source_kite_without_a_session_is_refused(self):
+        code, text, err = run(["run", "--now", NOW, "--source", "kite"])
+        self.assertEqual(code, 1)
+        self.assertEqual(err.strip(), "timemachine.py: no Kite session for today: log in first "
+                                      "(python3 trader-broker/kite.py login), or use --source yahoo")
+
+    def test_a_refused_session_is_one_plain_line(self):
+        self.login()
+        self.fake.fail["/instruments/historical"] = (403, os.path.join(KDIR, "error-token-synthetic.json"))
+        code, text, err = run(["run", "--now", NOW])
+        self.assertEqual(code, 1)
+        self.assertEqual(len(err.strip().splitlines()), 1, err)
+        self.assertIn("timemachine.py: Kite refused the session (TokenException", err)
+        self.assertNotIn(self.TOKEN, text + err)
+
+    def test_the_token_never_shows(self):
+        self.login()
+        code, text, err = run(["run", "--now", NOW, "--replays", "300", "--write"])
+        self.assertNotIn(self.TOKEN, text + err)
+        with open(os.path.join("trader", "timemachine.json")) as fh:
+            self.assertNotIn(self.TOKEN, fh.read())
+        code, text, err = run(["chart", "--now", NOW, "--replays", "300"])
+        self.assertEqual(code, 0, err)
+        self.assertNotIn(self.TOKEN, text + err)
 
 
 class Cli(unittest.TestCase):
