@@ -105,8 +105,10 @@ An example, end to end. It runs on the **synthetic test data** in
    target one times that risk, 1375.30; flat by 15:05 either way.
 5. **`/trader-timemachine`** replayed the rest of the day 10,000 times from
    DEMO's own 5-minute bars at that time of day over the previous 59 sessions
-   (seed 19), and re-ran the same rule on those 59 sessions. Its verdict is in
-   one line, and that is the point of looking before you risk a rupee.
+   (seed 19, to the 15:05 flat-by): target first 53.6 %, stop first 45.1 %,
+   still open 1.4 %. It also re-ran the same rule on those 59 sessions: it
+   fired 47 times, 23 hit the target, 21 the stop, 3 neither. Its verdict:
+   close to a coin flip. That is the point of looking before you risk a rupee.
 6. **`/trader-budget`** with a Rs 1,00,000 account and a Rs 1,000 max loss per
    trade: the 75 % position cap binds at 54 shares (Rs 73,785.60). If the stop
    fills at 1357.50, the loss is 54 x 8.90 = Rs 480.60 plus about Rs 73.07 of
