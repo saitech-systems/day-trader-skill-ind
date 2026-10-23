@@ -32,7 +32,7 @@ entry = load("trader-entry", "entry")
 BDIR = os.path.join(FIX, "trader-broker", "kite")
 CFG_PATH = os.path.join(ROOT, "trader-budget", "config.example.json")
 ORDERS_PATH = os.path.join(FIX, "trader-risk", "orders-demo.json")
-ENV = {"KITE_API_KEY": "demo_api_key", "KITE_API_SECRET": "demo_api_secret"}
+ENV = dict(KITE_API_KEY="demo_api_key", KITE_API_SECRET="demo_api_secret")   # made up, like the answers
 REQUEST_TOKEN = "RT9x2Kq7Lm"
 REDIRECT = "http://127.0.0.1/?action=login&type=login&status=success&request_token=" + REQUEST_TOKEN
 # sha256("demo_api_key" + "RT9x2Kq7Lm" + "demo_api_secret"), worked out once by hand

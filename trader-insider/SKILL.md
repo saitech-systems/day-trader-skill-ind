@@ -176,9 +176,9 @@ it, `/trader-risk` checks it, and `/trader-broker` places it only after their ye
   investment adviser or research analyst. Nothing in this pack is a recommendation to buy or sell.
 - Paper trading by default (`"paper": true` in `trader/config.json`): nothing reaches Zerodha.
 - Nothing places an order except `/trader-broker`, and only after `/trader-risk` passes that exact
-  order AND the user types an explicit yes for it in the chat, AND the Kite order tools are set to
-  "Needs approval" in Claude (Customize > Connectors > tool permissions) so Claude's own "Allow once /
-  Deny" card appears too. Never "Always allow" an order tool.
+  order AND the user types an explicit yes for it in the chat, AND then the user places it by hand in
+  Kite, or, on the Kite MCP route, clicks Allow once on Claude's own card (the Kite order tools set to
+  "Needs approval" in Customize > Connectors > tool permissions). Never "Always allow" an order tool.
 - No F&O, options, MTF or margin, short selling or leverage unless the config allows it and the user
   confirms.
 - Insider disclosures and bulk and block deals are PUBLIC records, posted days after the trade or after

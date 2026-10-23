@@ -164,8 +164,9 @@ make a plan pass, and never calls a stop a guarantee.
 - Paper trading by default (`"paper": true`): nothing reaches Zerodha. Going live is the user's own
   decision, in their own config.
 - Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the Kite order tools are set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
+  passed that exact order today, the user typed an explicit yes for that one order in the chat, and
+  then the user places it by hand in Kite, or, on the Kite MCP route, clicks Allow once on Claude's own
+  card because the Kite order tools are set to "Needs approval" (Customize > Connectors > tool
+  permissions). Never set an order tool to "Always allow".
 - No F&O, options, MTF or margin, short selling or leverage unless the config allows it and the user confirms.
 - Kite API keys and secrets live in the Claude Desktop config or environment variables, never in the chat.
