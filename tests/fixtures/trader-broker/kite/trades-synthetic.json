@@ -1,0 +1,20 @@
+{
+ "status": "success",
+ "data": [
+  {
+   "trade_id": "10000001",
+   "order_id": "261019000123456",
+   "exchange": "NSE",
+   "tradingsymbol": "DEMO",
+   "instrument_token": 9000001,
+   "product": "MIS",
+   "average_price": 1366.4,
+   "quantity": 54,
+   "exchange_order_id": "1100000000123456",
+   "transaction_type": "BUY",
+   "fill_timestamp": "2026-10-19 10:01:06",
+   "order_timestamp": "10:01:05",
+   "exchange_timestamp": "2026-10-19 10:01:06"
+  }
+ ]
+}

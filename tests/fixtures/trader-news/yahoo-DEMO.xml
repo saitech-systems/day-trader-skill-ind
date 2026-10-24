@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<rss version="2.0">
+    <channel>
+        <copyright>Synthetic test data, not Yahoo content.</copyright>
+        <description>Latest Financial News for DEMO.NS</description>
+        <language>en-IN</language>
+        <lastBuildDate>Mon, 19 Oct 2026 05:30:00 +0000</lastBuildDate>
+        <link>https://finance.yahoo.com/quote/DEMO.NS</link>
+        <title>Yahoo! Finance: DEMO.NS News</title>
+        <item>
+            <description>DEMO.NS traded near its high for the day.</description>
+            <guid isPermaLink="false">demo-0009</guid>
+            <link>https://finance.yahoo.com/news/demo-industries-hits-the-day-s-high-as-demo-0009.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 05:02:00 +0000</pubDate>
+            <title>Demo Industries hits the day's high as the broader market extends gains</title>
+        </item>
+        <item>
+            <description>CRISIL reaffirmed AA+/Stable on the company's long-term debt.</description>
+            <guid isPermaLink="false">demo-0008</guid>
+            <link>https://finance.yahoo.com/news/demo-industries-shares-rise-after-crisil-reaffirms-its-demo-0008.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 04:35:00 +0000</pubDate>
+            <title>Demo Industries shares rise after CRISIL reaffirms its credit rating</title>
+        </item>
+        <item>
+            <description>The resignation takes effect at the end of the month.</description>
+            <guid isPermaLink="false">demo-0007</guid>
+            <link>https://finance.yahoo.com/news/demo-industries-cfo-steps-down-company-names-an-demo-0007.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 04:18:00 +0000</pubDate>
+            <title>Demo Industries CFO steps down; company names an interim finance chief</title>
+        </item>
+        <item>
+            <description>Banks and autos led the early gains on the NSE.</description>
+            <guid isPermaLink="false">mkt-0006</guid>
+            <link>https://finance.yahoo.com/news/stock-market-today-nifty-opens-higher-demo-industries-mkt-0006.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 03:50:00 +0000</pubDate>
+            <title>Stock market today: Nifty opens higher; Demo Industries, Sample Motors among top gainers</title>
+        </item>
+        <item>
+            <description>Two brokerages raised their target price on NSE: DEMO before the quarter.</description>
+            <guid isPermaLink="false">demo-0005</guid>
+            <link>https://finance.yahoo.com/news/brokerages-raise-demo-industries-target-price-ahead-of-demo-0005.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 03:35:00 +0000</pubDate>
+            <title>Brokerages raise Demo Industries target price ahead of results, see 12% upside</title>
+        </item>
+        <item>
+            <description>The deal could value the battery business at about Rs 2,000 crore.</description>
+            <guid isPermaLink="false">demo-0004</guid>
+            <link>https://finance.yahoo.com/news/demo-industries-in-talks-to-acquire-a-stake-demo-0004.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 03:00:00 +0000</pubDate>
+            <title>Demo Industries in talks to acquire a stake in a battery maker, say people familiar</title>
+        </item>
+        <item>
+            <description>Demo Industries (DEMO) reports on 22 October; margins and other income are in focus.</description>
+            <guid isPermaLink="false">demo-0003</guid>
+            <link>https://finance.yahoo.com/news/demo-industries-to-announce-q2-fy27-results-on-demo-0003.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 02:34:00 +0000</pubDate>
+            <title>Demo Industries to announce Q2 FY27 results on Thursday: what to watch</title>
+        </item>
+        <item>
+            <description>Asian markets were mixed while crude held steady and the rupee opened flat.</description>
+            <guid isPermaLink="false">mkt-0002</guid>
+            <link>https://finance.yahoo.com/news/gift-nifty-signals-a-firm-start-sensex-and-mkt-0002.html?.tsrc=rss</link>
+            <pubDate>Mon, 19 Oct 2026 02:15:00 +0000</pubDate>
+            <title>GIFT Nifty signals a firm start; Sensex and Nifty futures edge higher</title>
+        </item>
+        <item>
+            <description>The board of Demo Industries will also take up the September quarter numbers.</description>
+            <guid isPermaLink="false">demo-0001</guid>
+            <link>https://finance.yahoo.com/news/demo-industries-board-to-consider-an-interim-dividend-demo-0001.html?.tsrc=rss</link>
+            <pubDate>Fri, 16 Oct 2026 12:40:00 +0000</pubDate>
+            <title>Demo Industries board to consider an interim dividend next week</title>
+        </item>
+    </channel>
+</rss>

@@ -1,0 +1,36 @@
+{
+ "status": "success",
+ "data": {
+  "user_type": "individual",
+  "email": "demo.user@example.com",
+  "user_name": "Demo User",
+  "user_shortname": "Demo",
+  "broker": "ZERODHA",
+  "exchanges": [
+   "NSE",
+   "BSE"
+  ],
+  "products": [
+   "CNC",
+   "NRML",
+   "MIS"
+  ],
+  "order_types": [
+   "MARKET",
+   "LIMIT",
+   "SL",
+   "SL-M"
+  ],
+  "avatar_url": null,
+  "user_id": "AB1234",
+  "api_key": "demo_api_key",
+  "access_token": "demo_access_token",
+  "public_token": "demo_public_token",
+  "refresh_token": "",
+  "enctoken": "demo_enctoken",
+  "login_time": "2026-10-19 08:58:01",
+  "meta": {
+   "demat_consent": "consent"
+  }
+ }
+}

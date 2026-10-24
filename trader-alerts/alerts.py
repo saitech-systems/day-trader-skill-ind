@@ -1,47 +1,58 @@
 #!/usr/bin/env python3
-"""Price alerts and the NYSE clock for trader-alerts. Standard library only.
+"""Price alerts and the NSE clock for trader-alerts. Standard library only.
 
-    python3 alerts.py clock                          # is the NYSE open? next open / close
-    python3 alerts.py quote TSLA --write             # quotes -> trader/prices.json
-    python3 alerts.py quote --holdings --write       # every ticker in your portfolio and plan
-    python3 alerts.py add --from-plan                # stop, target and flat-by-close from trader/plan.json
-    python3 alerts.py add --symbol TSLA --stop 358.32
-    python3 alerts.py add --symbol TSLA --target 370.04
-    python3 alerts.py add --at 15:55 --label "flat by close" --before-close
-    python3 alerts.py add --symbol KO --pct 3
+    python3 alerts.py clock                          # is the NSE open? next open / close
+    python3 alerts.py quote RELIANCE --write         # quotes -> trader/prices.json
+    python3 alerts.py quote RELIANCE --source kite   # live, from your own Kite Connect API (read only)
+    python3 alerts.py quote --holdings --write       # every symbol in your portfolio and plan
+    python3 alerts.py quote --set RELIANCE=1369.85 --source kite   # store a price read from Kite (get_ltp)
+    python3 alerts.py add --from-plan                # stop, target and flat-by time from trader/plan.json
+    python3 alerts.py add --symbol RELIANCE --stop 1357.50
+    python3 alerts.py add --symbol RELIANCE --target 1375.30
+    python3 alerts.py add --at 15:05 --label "flat by close" --symbol RELIANCE
+    python3 alerts.py add --symbol TCS --pct 3
     python3 alerts.py add --opening-bell
     python3 alerts.py check                          # rings what hit, once; exit 1 if nothing rang
-    python3 alerts.py check --now "2026-10-19 15:55" --offline tests/fixtures/trader-alerts
+    python3 alerts.py check --now "2026-10-19 15:05" --offline tests/fixtures/trader-alerts
     python3 alerts.py list
-    python3 alerts.py reset tsla-plan-stop
+    python3 alerts.py reset reliance-plan-stop
 
 Rule types:
   above / target  the price is at or above "price"
   below / stop    the price is at or below "price"
   pct_move        the price moved "pct" percent or more from the previous close
                   (or from "ref" if you give one); "direction": "up" or "down"
-  opening_bell    the NYSE opened today (rings once per trading day)
-  time            the New York clock passed "at" (HH:MM) on a trading day
-                  (rings once per trading day); "before_close": true moves it
-                  3 hours earlier on a 1:00 p.m. early close, so a 15:55
-                  "flat by close" rings at 12:55 on those days
+  opening_bell    the NSE opened today (rings once per trading day: 9:15, or a
+                  special session's own open, like Muhurat trading at 14:20)
+  time            the India clock passed "at" (HH:MM) on a trading day
+                  (rings once per trading day)
 
-A rule with "date" is only watched on that New York date (rules from a plan
-are for the plan's day only). An above / below alert rings ONCE and then stays
+A rule with "date" is only watched on that India date (rules from a plan are
+for the plan's day only). An above / below alert rings ONCE and then stays
 quiet until you reset it, unless the rule has "rearm": true (it re-arms when
 the price crosses back). A pct_move alert rings at most once per day.
 
-Quotes (free, delayed, unofficial; for alerts only, never for timing an order):
-  yahoo   https://query2.finance.yahoo.com/v8/finance/chart/TSLA (falls back to
-          query1 on a 429 or a 5xx; one retry with a pause on a 429; one
-          request per ticker, half a second apart; the default)
-  stooq   https://stooq.com/q/l/?s=tsla.us&f=sd2t2ohlcv&h&e=csv (Stooq's free
-          CSV; it answered 404 on 2026-10-13, kept for when it is back)
-  --offline DIR reads DIR/<source>-<TICKER>.json|csv (or .json.gz) instead.
+Quotes (for alerts and sizing checks, never for timing an order). --source
+picks them, else "data_source" in trader/config.json, else auto:
+  kite    your own Kite Connect API (Connect plan), READ ONLY: one
+          https://api.kite.trade/quote request for every symbol, live last price,
+          previous close and the time of the last trade. It needs today's login
+          (python3 trader-broker/kite.py login, then session), saved in
+          trader/state/kite-session.json; Zerodha ends it at 6:00 AM IST.
+  yahoo   free, delayed, unofficial:
+          https://query2.finance.yahoo.com/v8/finance/chart/RELIANCE.NS (falls back
+          to query1 on a 429 or a 5xx; one retry with a pause on a 429; one
+          request per symbol, half a second apart)
+  auto    Kite when a session from today is saved, else Yahoo (and it says so)
+  quote --set SYMBOL=PRICE --source kite stores a price read elsewhere (the Kite
+  MCP connector's get_ltp), so sizing and the risk check can use it.
+  --offline DIR reads DIR/yahoo-<SYMBOL>.json (or .json.gz) instead, whatever --source says.
 
-NYSE calendar: the 2026 and 2027 holidays and 1:00 p.m. early closes as
-published at https://www.nyse.com/markets/hours-calendars (read 2026-10-13).
-Outside those years the clock says the holiday list is unknown.
+NSE calendar: the 2026 equity holidays and special sessions (the Budget-day
+Sunday and Muhurat trading) from the NSE holiday list (nseindia.com, read
+2026-10-23). NSE publishes next year's list in December; outside 2026 the
+clock says the holiday list is unknown. Times are India time (IST, UTC+5:30,
+no daylight saving).
 """
 
 import argparse
@@ -55,171 +66,508 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from decimal import Decimal, ROUND_HALF_UP
 
-UA = "Mozilla/5.0 (compatible; day-trader-skill/2.0; +https://github.com/Jakeschincariol/day-trader-skill)"
+UA = "Mozilla/5.0 (compatible; day-trader-skill-ind/1.0; +https://github.com/saitech-systems/day-trader-skill-ind)"
 PAUSE = 0.5    # seconds between requests: be polite to free endpoints
 BACKOFF = 2.0  # seconds to wait before the one retry after a 429
 YAHOO_HOSTS = ("query2.finance.yahoo.com", "query1.finance.yahoo.com")
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
-
-NYSE_HOLIDAYS = {
-    "2026-01-01": "New Year's Day",
-    "2026-01-19": "Martin Luther King, Jr. Day",
-    "2026-02-16": "Washington's Birthday",
-    "2026-04-03": "Good Friday",
-    "2026-05-25": "Memorial Day",
-    "2026-06-19": "Juneteenth National Independence Day",
-    "2026-07-03": "Independence Day (observed)",
-    "2026-09-07": "Labor Day",
-    "2026-11-26": "Thanksgiving Day",
-    "2026-12-25": "Christmas Day",
-    "2027-01-01": "New Year's Day",
-    "2027-01-18": "Martin Luther King, Jr. Day",
-    "2027-02-15": "Washington's Birthday",
-    "2027-03-26": "Good Friday",
-    "2027-05-31": "Memorial Day",
-    "2027-06-18": "Juneteenth National Independence Day (observed)",
-    "2027-07-05": "Independence Day (observed)",
-    "2027-09-06": "Labor Day",
-    "2027-11-25": "Thanksgiving Day",
-    "2027-12-24": "Christmas Day (observed)",
-}
-NYSE_EARLY_CLOSE = {  # 1:00 p.m. ET
-    "2026-11-27": "day after Thanksgiving",
-    "2026-12-24": "Christmas Eve",
-    "2027-11-26": "day after Thanksgiving",
-}
-CALENDAR_YEARS = (2026, 2027)
-OPEN = datetime.time(9, 30)
-CLOSE = datetime.time(16, 0)
-EARLY = datetime.time(13, 0)
+# Closing auction (CAS): from 2026-08-03 to 2026-12-06 F&O stocks stop continuous trading at
+# 15:15; from 2026-12-07 every stock trades to 15:30 and the auction runs 15:30 to 15:40.
+CAS_315 = ("2026-08-03", "2026-12-06")
+SQUARE_OFF = ("Zerodha squares off open MIS positions itself at about 15:25 (15:12 for F&O stocks until "
+              "2026-12-06) and charges Rs 50 + GST an order for it")
 
 
 class AlertError(Exception):
     pass
 
 
-# ---------------------------------------------------------------- time
+# ---------------------------------------------------------------- BLOCK: NSE calendar (India time, no tz files)
 
-def _nth_sunday(year, month, n):
-    d = datetime.date(year, month, 1)
-    d += datetime.timedelta(days=(6 - d.weekday()) % 7)
-    return d + datetime.timedelta(weeks=n - 1)
+IST = datetime.timedelta(hours=5, minutes=30)   # India Standard Time: UTC+5:30 all year, no daylight saving
+EPOCH = datetime.datetime(1970, 1, 1)
+
+# NSE equity segment trading holidays that fall on weekdays, from the NSE holiday
+# list (nseindia.com/resources/exchange-communication-holidays, read 2026-10-23).
+# NSE publishes next year's list in December: 2027 is not out yet.
+NSE_HOLIDAYS = {
+    "2026-01-15": "Municipal Corporation Elections in Maharashtra",
+    "2026-01-26": "Republic Day",
+    "2026-03-03": "Holi",
+    "2026-03-26": "Shri Ram Navami",
+    "2026-03-31": "Shri Mahavir Jayanti",
+    "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
+    "2026-05-01": "Maharashtra Day",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
+    "2026-11-10": "Diwali Balipratipada",
+    "2026-11-24": "Prakash Gurpurb Sri Guru Nanak Dev",
+    "2026-12-25": "Christmas",
+}
+# Special sessions on days that are otherwise closed: (open, close, name), India time.
+NSE_SPECIAL_SESSIONS = {
+    "2026-02-01": ("09:15", "15:30", "Union Budget day (Sunday), normal hours"),
+    "2026-11-08": ("14:20", "15:30", "Muhurat trading, Diwali Laxmi Pujan (Sunday)"),
+}
+CALENDAR_YEARS = (2026,)
+OPEN = datetime.time(9, 15)
+CLOSE = datetime.time(15, 30)
 
 
-def eastern_offset(utc):
-    """Hours from UTC for New York: -4 in daylight time, -5 otherwise.
-    DST runs from 2:00 a.m. on the second Sunday of March to 2:00 a.m. on the
-    first Sunday of November (US rule since 2007)."""
-    y = utc.year
-    start = datetime.datetime.combine(_nth_sunday(y, 3, 2), datetime.time(7, 0))   # 2:00 EST
-    end = datetime.datetime.combine(_nth_sunday(y, 11, 1), datetime.time(6, 0))    # 2:00 EDT
-    naive = utc.replace(tzinfo=None)
-    return -4 if start <= naive < end else -5
+def to_ist(utc):
+    """naive UTC -> naive India time."""
+    return utc.replace(tzinfo=None) + IST
 
 
-def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
+def ist_to_utc(local):
+    """naive India time -> naive UTC."""
+    return local.replace(tzinfo=None) - IST
 
 
-def eastern_to_utc(local):
-    for off in (-4, -5):
-        utc = local - datetime.timedelta(hours=off)
-        if eastern_offset(utc) == off:
-            return utc
-    return local + datetime.timedelta(hours=5)
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
 
 
-def parse_now(text):
-    """ISO time -> naive UTC. A time without an offset is taken as New York time."""
-    if not text:
-        return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
-    t = text.strip().replace("Z", "+00:00")
-    try:
-        dt = datetime.datetime.fromisoformat(t)
-    except ValueError:
-        raise AlertError("--now wants a time like \"2026-10-19 10:15\" (New York) or ...Z (UTC)")
-    if dt.tzinfo is None:
-        return eastern_to_utc(dt)
-    return (dt - dt.utcoffset()).replace(tzinfo=None)
+def utc_of(ts):
+    """Unix seconds -> naive UTC, without the machine's time zone."""
+    return EPOCH + datetime.timedelta(seconds=int(ts))
+
+
+def ts_of(utc):
+    return int((utc.replace(tzinfo=None) - EPOCH).total_seconds())
+
+
+def _hm(text):
+    h, m = text.split(":")
+    return datetime.time(int(h), int(m))
 
 
 def trading_day(d):
-    """(is_trading_day, reason). Weekends and the NYSE holiday list."""
+    """(is_trading_day, reason). Weekends, NSE holidays and special sessions."""
+    k = d.isoformat()
+    if k in NSE_SPECIAL_SESSIONS:
+        return True, "special session: " + NSE_SPECIAL_SESSIONS[k][2]
     if d.weekday() >= 5:
         return False, "weekend"
-    name = NYSE_HOLIDAYS.get(d.isoformat())
+    name = NSE_HOLIDAYS.get(k)
     if name:
-        return False, "NYSE holiday: " + name
+        return False, "NSE holiday: " + name
     return True, ""
 
 
 def session(d):
-    """(open_time, close_time) in New York time, or None if closed all day."""
-    ok, _ = trading_day(d)
-    if not ok:
+    """(open_time, close_time) in India time, or None if NSE is closed all day."""
+    k = d.isoformat()
+    if k in NSE_SPECIAL_SESSIONS:
+        o, c, _ = NSE_SPECIAL_SESSIONS[k]
+        return _hm(o), _hm(c)
+    if d.weekday() >= 5 or k in NSE_HOLIDAYS:
         return None
-    return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
+    return OPEN, CLOSE
+
+
+def next_open(d):
+    """"2026-10-21 09:15": the next session's open after day d, or None."""
+    nd = d + datetime.timedelta(days=1)
+    for _ in range(15):
+        s = session(nd)
+        if s:
+            return "%s %02d:%02d" % (nd.isoformat(), s[0].hour, s[0].minute)
+        nd += datetime.timedelta(days=1)
+    return None
+
+
+def parse_now(text):
+    """--now -> naive UTC. "2026-10-19 10:15" (or ...T10:15, or just 10:15 for
+    today) is India time; an offset or Z makes it absolute."""
+    if not text:
+        return utc_now()
+    t = text.strip()
+    if t.upper().endswith(" IST"):
+        t = t[:-4].strip()
+    if re.match(r"^\d{1,2}:\d{2}$", t):
+        t = "%s %s" % (to_ist(utc_now()).date().isoformat(), t.zfill(5))
+    t = t.replace("Z", "+00:00")
+    try:
+        dt = datetime.datetime.fromisoformat(t)
+    except ValueError:
+        raise AlertError('--now wants an India time like "2026-10-19 10:15" (or ...Z for UTC)')
+    if dt.tzinfo is None:
+        return ist_to_utc(dt)
+    return (dt - dt.utcoffset()).replace(tzinfo=None)
+
+# ---------------------------------------------------------------- BLOCK: NSE symbols on Yahoo
+
+NSE_SYMBOL = re.compile(r"^[A-Z0-9][A-Z0-9&\-]{0,19}$")   # RELIANCE, M&M, BAJAJ-AUTO, 3MINDIA
+
+
+def nse_symbol(text):
+    """"reliance", "RELIANCE.NS", "NSE:RELIANCE" -> "RELIANCE". BSE (.BO) is refused."""
+    s = str(text or "").strip().upper()
+    if s.startswith("NSE:"):
+        s = s[4:]
+    if s.endswith(".NS"):
+        s = s[:-3]
+    if s.endswith(".BO") or s.startswith("BSE:"):
+        raise AlertError("%s is a BSE listing: this pack trades NSE symbols (like RELIANCE)" % text)
+    if not NSE_SYMBOL.match(s):
+        raise AlertError("%r is not an NSE symbol (like RELIANCE, M&M or BAJAJ-AUTO)" % text)
+    return s
+
+
+def yahoo_symbol(sym):
+    """RELIANCE -> RELIANCE.NS (Yahoo's NSE suffix)."""
+    return nse_symbol(sym) + ".NS"
+
+
+def yahoo_quote(sym):
+    """For a URL path: M&M -> M%26M.NS."""
+    from urllib.parse import quote
+    return quote(yahoo_symbol(sym), safe=".-")
+
+# ---------------------------------------------------------------- BLOCK: rupees and ticks
+
+TICK_BANDS = (  # NSE cash-segment tick size by price, circular NSE/CMTR/66133 (from 2025-04-15)
+    (Decimal("250"), Decimal("0.01")),
+    (Decimal("1000"), Decimal("0.05")),
+    (Decimal("5000"), Decimal("0.10")),
+    (Decimal("10000"), Decimal("0.50")),
+    (Decimal("20000"), Decimal("1.00")),
+)
+TOP_TICK = Decimal("5.00")
+
+
+def D(x):
+    if isinstance(x, Decimal):
+        return x
+    if isinstance(x, float):
+        return Decimal(repr(x))
+    return Decimal(str(x).strip().replace(",", ""))
+
+
+def tick_size(price):
+    """The NSE tick for a price: 0.01 under Rs 250, 0.05 to 1,000, 0.10 to 5,000,
+    0.50 to 10,000, 1.00 to 20,000, 5.00 above. NSE reviews each stock's tick
+    monthly from the last month's close, so a stock near a band edge can differ."""
+    p = D(price)
+    for upto, tick in TICK_BANDS:
+        if p < upto:
+            return tick
+    return TOP_TICK
+
+
+def to_tick(price, rounding=ROUND_HALF_UP, tick=None):
+    """Round a price onto the tick grid. ROUND_FLOOR for a long's stop (down,
+    away from the entry), ROUND_CEILING for a buy limit, ROUND_HALF_UP for a target."""
+    p = D(price)
+    t = D(tick) if tick is not None else tick_size(p)
+    return ((p / t).quantize(Decimal("1"), rounding=rounding) * t).quantize(Decimal("0.01"))
+
+
+def inr(x, paise=None):
+    """Rs 1,23,456.50 with Indian digit grouping (lakh, crore). Whole rupees
+    drop the paise unless paise=True; paise=False always rounds to the rupee."""
+    v = float(x)
+    s = "%.2f" % abs(v)
+    whole, frac = s.split(".")
+    if paise is False:
+        whole, frac = str(int(round(abs(v)))), "00"
+    if len(whole) > 3:
+        head, tail = whole[:-3], whole[-3:]
+        groups = []
+        while len(head) > 2:
+            groups.insert(0, head[-2:])
+            head = head[:-2]
+        if head:
+            groups.insert(0, head)
+        whole = ",".join(groups + [tail])
+    out = "Rs " + whole + ("" if (frac == "00" and not paise) else "." + frac)
+    return ("-" if v < 0 and float(s) != 0 else "") + out
+
+# ---------------------------------------------------------------- the market clock
+
+def cas_note(d):
+    """The closing-auction line for a trading day, or None."""
+    k = d.isoformat()
+    if CAS_315[0] <= k <= CAS_315[1]:
+        return ("F&O stocks stop continuous trading at 15:15 for the closing auction (15:15 to about 15:35) "
+                "until 2026-12-06; other stocks trade to 15:30")
+    if k > CAS_315[1]:
+        return "the closing auction runs 15:30 to 15:40, after the session"
+    return None
 
 
 def market_status(now_utc):
-    local = to_eastern(now_utc)
+    local = to_ist(now_utc)
     d = local.date()
     ok, reason = trading_day(d)
-    st = {"now_new_york": local.strftime("%Y-%m-%d %H:%M"), "date": d.isoformat(),
+    special = NSE_SPECIAL_SESSIONS.get(d.isoformat())
+    st = {"now_ist": local.strftime("%Y-%m-%d %H:%M"), "date": d.isoformat(),
           "weekday": local.strftime("%A"), "calendar_known": d.year in CALENDAR_YEARS,
-          "open": False, "reason": reason, "early_close": NYSE_EARLY_CLOSE.get(d.isoformat())}
+          "open": False, "reason": reason, "special_session": special[2] if special else None}
     s = session(d)
     if s:
         o, c = s
         st["opens"], st["closes"] = o.strftime("%H:%M"), c.strftime("%H:%M")
         if o <= local.time() < c:
             st["open"] = True
-            st["reason"] = "regular session"
+            st["reason"] = "special session: %s" % special[2] if special else "regular session"
         elif local.time() < o:
             st["reason"] = "before the open"
         else:
             st["reason"] = "after the close"
-    # next open
-    nd = d if (s and local.time() < s[0]) else d + datetime.timedelta(days=1)
-    for _ in range(15):
-        if session(nd):
-            st["next_open"] = "%s 09:30" % nd.isoformat()
-            break
-        nd += datetime.timedelta(days=1)
+        note = cas_note(d) if not special else None
+        if note:
+            st["auction"] = note
+    nxt = next_open(d - datetime.timedelta(days=1)) if (s and local.time() < s[0]) else next_open(d)
+    if nxt:
+        st["next_open"] = nxt
+        ns = NSE_SPECIAL_SESSIONS.get(nxt[:10])
+        if ns:
+            st["next_open_session"] = ns[2]
     return st
+
+
+# BEGIN KITE BLOCK
+# ---------------------------------------------------------------- Kite Connect, read only (market data, account)
+#
+# Your own Kite Connect app (developers.kite.trade; the Connect plan carries the
+# market data). trader-broker/kite.py logs in once a day and saves the session to
+# trader/state/kite-session.json; every tool reads it from there. Zerodha ends
+# every session at 6:00 AM IST. KITE_API_KEY + KITE_ACCESS_TOKEN in the
+# environment win over the file. This block only ever GETs: no orders.
+
+KITE_API = "https://api.kite.trade"
+KITE_SESSION = "trader/state/kite-session.json"
+KITE_INSTRUMENTS = "trader/state/kite-instruments-NSE.json"
+KITE_INTERVALS = {"1m": "minute", "5m": "5minute", "1d": "day"}
+KITE_PAUSE = 0.35           # historical candles: Kite allows 3 requests a second
+KITE_QUOTE_PAUSE = 1.0      # quotes: 1 request a second, up to 500 symbols each
+KITE_SOURCES = ("auto", "kite", "yahoo")
+
+
+def kite_urlopen(req, timeout=20):
+    """The one network call of the block (tests replace it)."""
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def kite_expiry(login_utc):
+    """Kite sessions end at 6:00 AM IST after the login: naive UTC."""
+    local = to_ist(login_utc)
+    six = datetime.datetime.combine(local.date(), datetime.time(6, 0))
+    if local >= six:
+        six += datetime.timedelta(days=1)
+    return ist_to_utc(six)
+
+
+def kite_session(path=KITE_SESSION, now_utc=None):
+    """The saved session while it is valid, else None. Never prints the token."""
+    key, token = os.environ.get("KITE_API_KEY"), os.environ.get("KITE_ACCESS_TOKEN")
+    if key and token:
+        return {"api_key": key, "access_token": token, "source": "environment"}
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        login = datetime.datetime.strptime(doc["login_utc"], "%Y-%m-%dT%H:%M:%SZ")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not doc.get("api_key") or not doc.get("access_token"):
+        return None
+    if (now_utc or utc_now()) >= kite_expiry(login):
+        return None
+    return dict(doc, source=path)
+
+
+def kite_request(sess, path, params=None, timeout=20):
+    """GET one Kite path: the raw body text. Plain-words AlertError on failure."""
+    query = urllib.parse.urlencode(params or [], doseq=True)
+    url = KITE_API + path + ("?" + query if query else "")
+    req = urllib.request.Request(url, headers={
+        "X-Kite-Version": "3", "User-Agent": UA,
+        "Authorization": "token %s:%s" % (sess["api_key"], sess["access_token"])})
+    try:
+        with kite_urlopen(req, timeout) as r:
+            body = r.read()
+        if body[:2] == b"\x1f\x8b":         # a gzipped answer (the instrument dump can come that way)
+            body = gzip.decompress(body)
+        return body.decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            doc = json.loads(e.read().decode("utf-8", "replace"))
+            why = "%s: %s" % (doc.get("error_type") or "error", doc.get("message") or "")
+        except Exception:
+            why = "HTTP %d" % e.code
+        finally:
+            e.close()
+        if e.code in (401, 403):
+            raise AlertError("Kite refused the session (%s). Log in again with /trader-broker (kite.py login)" % why)
+        if e.code == 429:
+            raise AlertError("Kite says too many requests (%s): wait a few seconds and try again" % why)
+        raise AlertError("Kite answered HTTP %d for %s (%s)" % (e.code, path, why))
+    except urllib.error.URLError as e:
+        raise AlertError("could not reach Kite (%s): check the connection" % (e.reason,))
+    except OSError as e:
+        raise AlertError("could not reach Kite: %s" % (e,))
+
+
+def kite_get(sess, path, params=None):
+    """GET a Kite JSON path: its "data"."""
+    text = kite_request(sess, path, params)
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        raise AlertError("Kite sent something that is not JSON for %s" % path)
+    if doc.get("status") != "success":
+        raise AlertError("Kite said %s for %s: %s" % (doc.get("error_type") or "error", path, doc.get("message")))
+    return doc.get("data")
+
+
+def kite_instruments(sess, path=KITE_INSTRUMENTS, now_utc=None):
+    """{SYMBOL: {"token", "tick", "name", "lot"}} for NSE equities, from Kite's
+    instrument dump, cached for the day (Kite rebuilds it every morning)."""
+    today = to_ist(now_utc or utc_now()).date().isoformat()
+    if path and os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+            if doc.get("date") == today and doc.get("rows"):
+                return doc["rows"]
+        except (OSError, ValueError, AttributeError):
+            pass
+    text = kite_request(sess, "/instruments/NSE")
+    rows = {}
+    for r in csv.DictReader(io.StringIO(text)):
+        if r.get("segment") != "NSE" or r.get("instrument_type") != "EQ":
+            continue
+        try:
+            rows[r["tradingsymbol"].strip().upper()] = {
+                "token": int(r["instrument_token"]), "tick": float(r.get("tick_size") or 0.05),
+                "name": (r.get("name") or "").strip(), "lot": int(float(r.get("lot_size") or 1))}
+        except (KeyError, ValueError):
+            continue
+    if not rows:
+        raise AlertError("Kite's NSE instrument list came back empty")
+    if path:
+        try:
+            d = os.path.dirname(path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"date": today, "rows": rows}, fh)
+        except OSError:
+            pass
+    return rows
+
+
+def kite_ts(text):
+    """"2026-10-19T09:15:00+0530" -> Unix seconds."""
+    dt = datetime.datetime.strptime(str(text).strip(), "%Y-%m-%dT%H:%M:%S%z")
+    return int((dt - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)).total_seconds())
+
+
+def kite_quotes(sess, symbols, pause=KITE_QUOTE_PAUSE):
+    """{SYM: {"price", "prev_close", "time" (naive UTC or None), "volume"}}, 500 a call."""
+    syms = [nse_symbol(s) for s in symbols]
+    out = {}
+    for i in range(0, len(syms), 500):
+        if i:
+            time.sleep(pause)
+        batch = syms[i:i + 500]
+        data = kite_get(sess, "/quote", [("i", "NSE:" + s) for s in batch]) or {}
+        for s in batch:
+            d = data.get("NSE:" + s)
+            if not d or d.get("last_price") is None:
+                continue
+            stamp = d.get("last_trade_time") or d.get("timestamp")
+            when = None
+            if stamp:
+                try:
+                    when = ist_to_utc(datetime.datetime.strptime(str(stamp)[:19], "%Y-%m-%d %H:%M:%S"))
+                except ValueError:
+                    when = None
+            out[s] = {"price": float(d["last_price"]), "prev_close": (d.get("ohlc") or {}).get("close"),
+                      "time": when, "volume": d.get("volume")}
+    return out
+
+
+def kite_chart(sess, sym, interval, start_day, end_day, now_utc=None, with_quote=True):
+    """Kite candles for one NSE stock from start_day to end_day (dates, IST),
+    returned as Yahoo chart JSON v8 text: the tool then reads it exactly like a
+    Yahoo answer. A forming candle comes back too; the tool's own closed-bar
+    rule decides when it counts. with_quote adds the previous close and the
+    last price from Kite's quote."""
+    sym = nse_symbol(sym)
+    if interval not in KITE_INTERVALS:
+        raise AlertError("Kite candles here are 1m, 5m or 1d, not %r" % interval)
+    inst = kite_instruments(sess, now_utc=now_utc).get(sym)
+    if not inst:
+        raise AlertError("Kite has no NSE equity called %s" % sym)
+    data = kite_get(sess, "/instruments/historical/%d/%s" % (inst["token"], KITE_INTERVALS[interval]),
+                    [("from", "%s 09:00:00" % start_day), ("to", "%s 16:00:00" % end_day)]) or {}
+    q = {"open": [], "high": [], "low": [], "close": [], "volume": []}
+    stamps = []
+    for row in data.get("candles") or []:
+        try:
+            t = kite_ts(row[0])
+            o, h, lo, c = (float(x) for x in row[1:5])
+        except (ValueError, TypeError, IndexError):
+            continue
+        stamps.append(t)
+        for k, v in zip(("open", "high", "low", "close"), (o, h, lo, c)):
+            q[k].append(v)
+        q["volume"].append(int(row[5]) if len(row) > 5 and row[5] is not None else 0)
+    now_ts = ts_of(now_utc or utc_now())
+    step = {"1m": 60, "5m": 300, "1d": 86400}[interval]
+    last_end = (stamps[-1] + step) if stamps else now_ts
+    meta = {"symbol": yahoo_symbol(sym), "currency": "INR", "exchangeName": "NSI", "fullExchangeName": "NSE",
+            "instrumentType": "EQUITY", "dataGranularity": interval, "gmtoffset": 19800, "timezone": "IST",
+            "exchangeTimezoneName": "Asia/Kolkata", "regularMarketTime": min(now_ts, last_end),
+            "longName": inst["name"], "tickSize": inst["tick"], "source": "kite"}
+    if stamps:
+        meta["regularMarketPrice"] = q["close"][-1]
+    if with_quote:
+        time.sleep(KITE_PAUSE)
+        quote = kite_quotes(sess, [sym]).get(sym) or {}
+        if quote.get("prev_close"):
+            meta["previousClose"] = meta["chartPreviousClose"] = float(quote["prev_close"])
+        if quote.get("price") is not None:
+            meta["regularMarketPrice"] = quote["price"]
+    return json.dumps({"chart": {"result": [{"meta": meta, "timestamp": stamps, "indicators": {"quote": [q]}}],
+                                 "error": None}})
+
+
+def pick_source(choice=None, cfg=None, now_utc=None, path=KITE_SESSION):
+    """(source, session, note). --source wins, then "data_source" in the config.
+    "auto" (the default) is Kite when a session from today is saved, else Yahoo."""
+    want = str(choice or (cfg or {}).get("data_source") or "auto").strip().lower()
+    if want not in KITE_SOURCES:
+        raise AlertError("data source is auto, kite or yahoo, not %r" % want)
+    if want == "yahoo":
+        return "yahoo", None, ""
+    sess = kite_session(path, now_utc)
+    if sess:
+        return "kite", sess, ""
+    if want == "kite":
+        raise AlertError("no Kite session for today: log in first with /trader-broker (kite.py login), "
+                        "or use --source yahoo")
+    return "yahoo", None, "no Kite session today, so free Yahoo data (log in with /trader-broker for live Kite data)"
+# END KITE BLOCK
 
 
 # ---------------------------------------------------------------- quotes
 
-def stooq_url(sym):
-    return "https://stooq.com/q/l/?s=%s.us&f=sd2t2ohlcv&h&e=csv" % sym.lower().replace(".", "-")
-
-
 def yahoo_url(sym, host=YAHOO_HOSTS[0]):
-    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, sym.upper().replace(".", "-"))
-
-
-def parse_stooq(text, sym):
-    """Symbol,Date,Time,Open,High,Low,Close,Volume -> quote. N/D means no data."""
-    rows = list(csv.DictReader(io.StringIO(text.strip())))
-    if not rows:
-        raise AlertError("Stooq returned no rows for %s" % sym)
-    r = {k.strip().lower(): (v or "").strip() for k, v in rows[0].items() if k}
-    close = r.get("close", "")
-    if not close or close.upper() == "N/D":
-        raise AlertError("Stooq has no data for %s (check the ticker)" % sym)
-
-    def f(k):
-        v = r.get(k, "")
-        try:
-            return float(v)
-        except ValueError:
-            return None
-    return {"symbol": sym.upper(), "price": float(close), "open": f("open"), "high": f("high"),
-            "low": f("low"), "prev_close": None, "time": ("%s %s" % (r.get("date", ""), r.get("time", ""))).strip(),
-            "source": "stooq"}
+    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, yahoo_quote(sym))
 
 
 def parse_yahoo(text, sym):
@@ -230,7 +578,7 @@ def parse_yahoo(text, sym):
         raise AlertError("Yahoo returned something unexpected for %s" % sym)
     if not res:
         err = (data.get("chart") or {}).get("error") or {}
-        raise AlertError("Yahoo has no data for %s: %s" % (sym, err.get("description", "unknown ticker")))
+        raise AlertError("Yahoo has no data for %s: %s" % (sym, err.get("description", "unknown symbol")))
     m = res[0].get("meta", {})
     price = m.get("regularMarketPrice")
     if price is None:
@@ -240,7 +588,7 @@ def parse_yahoo(text, sym):
             if t else "")
     q = (res[0].get("indicators", {}).get("quote") or [{}])[0]
     opens = [x for x in (q.get("open") or []) if x is not None]
-    return {"symbol": sym.upper(), "price": float(price), "open": opens[0] if opens else None,
+    return {"symbol": nse_symbol(sym), "price": float(price), "open": opens[0] if opens else None,
             "high": m.get("regularMarketDayHigh"), "low": m.get("regularMarketDayLow"),
             "prev_close": m.get("previousClose") or m.get("chartPreviousClose"), "time": when,
             "currency": m.get("currency"), "source": "yahoo"}
@@ -271,13 +619,6 @@ def _get(url, timeout=20):
         raise AlertError("could not reach %s: %s" % (url.split("/")[2], e.reason))
 
 
-def fetch(url, timeout=20):
-    code, text = _get(url, timeout)
-    if code != 200:
-        raise AlertError("%s answered HTTP %d" % (url.split("?")[0], code))
-    return text
-
-
 def fetch_yahoo(sym, timeout=20):
     """query2 first. A 429 waits BACKOFF seconds and tries once more; a 429 or a 5xx
     after that moves on to query1. A 404 comes back as Yahoo's own error JSON."""
@@ -298,9 +639,8 @@ def fetch_yahoo(sym, timeout=20):
     raise AlertError("%s answered HTTP %d" % (last[0].split("?")[0], last[1]))
 
 
-def _offline_text(folder, source, sym):
-    ext = "csv" if source == "stooq" else "json"
-    base = os.path.join(folder, "%s-%s.%s" % (source, sym, ext))
+def _offline_text(folder, sym):
+    base = os.path.join(folder, "yahoo-%s.json" % sym)
     if os.path.exists(base):
         with open(base, encoding="utf-8") as fh:
             return fh.read()
@@ -310,22 +650,87 @@ def _offline_text(folder, source, sym):
     raise AlertError("no offline quote file %s" % base)
 
 
-def get_quotes(symbols, source="yahoo", offline=None, pause=PAUSE):
-    """{SYM: quote} and [errors]. One request per ticker, with a pause between."""
-    quotes, errors = {}, []
-    for i, sym in enumerate(symbols):
-        sym = sym.upper()
+SOURCE_WORDS = {"kite": "Kite, live", "yahoo": "Yahoo, free, delayed", "offline": "saved Yahoo files"}
+
+
+def source_for(a, now):
+    """(source, Kite session or None, note). --offline reads saved Yahoo files and wins;
+    else --source, then "data_source" in the config, else auto."""
+    if a.offline:
+        return "yahoo", None, ""
+    cfg = _read(a.config, {}) if getattr(a, "config", None) else {}
+    return pick_source(a.source, cfg if isinstance(cfg, dict) else {}, now)
+
+
+def get_kite_quotes(symbols, sess):
+    """{SYM: quote} and [errors] from ONE Kite /quote request for every symbol."""
+    quotes, errors, syms = {}, [], []
+    for raw in symbols:
         try:
+            s = nse_symbol(raw)
+        except AlertError as e:
+            errors.append(str(e))
+            continue
+        if s not in syms:
+            syms.append(s)
+    if not syms:
+        return quotes, errors
+    try:
+        got = kite_quotes(sess, syms)
+    except AlertError as e:
+        return quotes, errors + [str(e)]
+    for s in syms:
+        q = got.get(s)
+        if not q:
+            errors.append("Kite has no quote for %s" % s)
+            continue
+        quotes[s] = {"symbol": s, "price": float(q["price"]),
+                     "prev_close": float(q["prev_close"]) if q.get("prev_close") else None,
+                     "time": q["time"].strftime("%Y-%m-%dT%H:%M:%SZ") if q.get("time") else "",
+                     "source": "kite"}
+    return quotes, errors
+
+
+def get_quotes(symbols, offline=None, pause=PAUSE, source="yahoo", sess=None):
+    """{SYM: quote} and [errors]. Yahoo: one request per symbol, with a pause between.
+    Kite: one request for all of them. --offline (saved Yahoo files) wins."""
+    if source == "kite" and not offline:
+        return get_kite_quotes(symbols, sess)
+    quotes, errors = {}, []
+    asked = 0
+    for raw in symbols:
+        try:
+            sym = nse_symbol(raw)
             if offline:
-                text = _offline_text(offline, source, sym)
+                text = _offline_text(offline, sym)
             else:
-                if i and pause:
+                if asked and pause:
                     _sleep(pause)
-                text = fetch(stooq_url(sym)) if source == "stooq" else fetch_yahoo(sym)
-            quotes[sym] = parse_stooq(text, sym) if source == "stooq" else parse_yahoo(text, sym)
+                asked += 1
+                text = fetch_yahoo(sym)
+            quotes[sym] = parse_yahoo(text, sym)
         except AlertError as e:
             errors.append(str(e))
     return quotes, errors
+
+
+def parse_set(items, source, now_utc):
+    """["RELIANCE=1369.85"] -> {SYM: quote} for prices read elsewhere (Kite's get_ltp)."""
+    quotes = {}
+    stamp = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    for item in items:
+        if "=" not in item:
+            raise AlertError("--set wants SYMBOL=PRICE, like RELIANCE=1369.85 (got %r)" % item)
+        s, p = item.split("=", 1)
+        sym = nse_symbol(s)
+        try:
+            price = float(p.strip().replace(",", ""))
+        except ValueError:
+            raise AlertError("--set %s: %r is not a price" % (sym, p))
+        if not price > 0:
+            raise AlertError("--set %s: the price must be above 0" % sym)
+        quotes[sym] = {"symbol": sym, "price": price, "prev_close": None, "time": stamp, "source": source}
+    return quotes
 
 
 def write_prices(path, quotes, now_utc, source):
@@ -344,8 +749,9 @@ def write_prices(path, quotes, now_utc, source):
         detail[s] = {"prev_close": q.get("prev_close"), "time": q.get("time"), "source": q.get("source"),
                      "fetched": stamp}
     doc = {"as_of": stamp, "source": source,
-           "note": ("Delayed quotes for alerts and sizing checks. Your broker's price is the one that fills. "
-                    "detail.fetched is when each price was read."),
+           "note": ("Prices for alerts and sizing checks. Yahoo's are delayed; Kite's get_ltp is live when it "
+                    "was read. Your broker's price is the one that fills. detail.fetched is when each price "
+                    "was stored."),
            "prices": prices, "detail": detail}
     _write(path, doc)
     return doc
@@ -372,6 +778,11 @@ def _read(path, default):
         raise AlertError("%s is not valid JSON: %s" % (path, e))
 
 
+def rs(x):
+    """A price for a sentence: Rs 1,369.85."""
+    return inr(x, paise=True)
+
+
 # ---------------------------------------------------------------- rules
 
 PRICE_TYPES = {"above", "below", "stop", "target", "pct_move", "opening_bell", "time"}
@@ -391,38 +802,32 @@ def validate(rule):
         raise AlertError("rule %s: unknown type %r" % (rule.get("id"), t))
     if t not in NO_QUOTE and not rule.get("symbol"):
         raise AlertError("rule %s needs a symbol" % rule.get("id"))
+    if rule.get("symbol"):
+        nse_symbol(rule["symbol"])
     if t in ("above", "below", "stop", "target") and not isinstance(rule.get("price"), (int, float)):
         raise AlertError("rule %s needs a numeric price" % rule.get("id"))
     if t == "pct_move" and not isinstance(rule.get("pct"), (int, float)):
         raise AlertError("rule %s needs a numeric pct" % rule.get("id"))
     if t == "time" and _hhmm(rule.get("at")) is None:
-        raise AlertError("rule %s needs \"at\" as a New York time like \"15:55\"" % rule.get("id"))
+        raise AlertError("rule %s needs \"at\" as an India time like \"15:05\"" % rule.get("id"))
     if rule.get("date") and not re.match(r"^\d{4}-\d{2}-\d{2}$", str(rule["date"])):
         raise AlertError("rule %s: date must be YYYY-MM-DD" % rule.get("id"))
 
 
 def active(rule, today):
-    """A rule with a "date" is watched on that New York date only."""
+    """A rule with a "date" is watched on that India date only."""
     return not rule.get("date") or str(rule["date"]) == today
 
 
 def _rang_today(stamp, today):
-    """Did a rule that rang at this UTC stamp ring on this New York date?"""
+    """Did a rule that rang at this UTC stamp ring on this India date?"""
     if not stamp:
         return False
     try:
         utc = datetime.datetime.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S")
     except ValueError:
         return stamp[:10] == today
-    return to_eastern(utc).date().isoformat() == today
-
-
-def ring_time(rule, status):
-    """The time a time rule rings today, moved 3 hours earlier on an early close if "before_close"."""
-    at = _hhmm(rule.get("at"))
-    if rule.get("before_close") and status.get("early_close"):
-        at = (datetime.datetime.combine(datetime.date(2000, 1, 1), at) - datetime.timedelta(hours=3)).time()
-    return at
+    return to_ist(utc).date().isoformat() == today
 
 
 def evaluate(rules, quotes, status, state, now_utc):
@@ -430,7 +835,7 @@ def evaluate(rules, quotes, status, state, now_utc):
     state = json.loads(json.dumps(state or {}))
     rung = state.setdefault("rung", {})
     today = status["date"]
-    local = to_eastern(now_utc)
+    local = to_ist(now_utc)
     stamp = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     rings = []
     for r in rules:
@@ -441,27 +846,28 @@ def evaluate(rules, quotes, status, state, now_utc):
         typ = {"stop": "below", "target": "above"}.get(r["type"], r["type"])
         if typ == "opening_bell":
             if status["open"] and not _rang_today(rung.get(rid), today):
-                rings.append({"id": rid, "symbol": "", "message": "Opening bell: the NYSE is open (%s New York)%s."
-                              % (status["now_new_york"], (", early close at 1:00 p.m. today, "
-                                                          + status["early_close"]) if status.get("early_close") else "")})
+                rings.append({"id": rid, "symbol": "", "message": "Opening bell: the NSE is open (%s IST)%s."
+                              % (status["now_ist"], (", %s, %s to %s" % (status["special_session"], status["opens"],
+                                                                         status["closes"]))
+                                 if status.get("special_session") else "")})
                 rung[rid] = stamp
             continue
         if typ == "time":
-            at = ring_time(r, status)
+            at = _hhmm(r.get("at"))
             if status.get("opens") and local.time() >= at and not _rang_today(rung.get(rid), today):
                 label = r.get("label") or "time alert"
-                msg = "%s%s: it is %s New York (set for %s)" % (label[:1].upper(), label[1:],
-                                                                 local.strftime("%H:%M"), at.strftime("%H:%M"))
+                msg = "%s%s: it is %s IST (set for %s)" % (label[:1].upper(), label[1:],
+                                                           local.strftime("%H:%M"), at.strftime("%H:%M"))
                 msg += (", the market closes at %s." % status["closes"]) if status["open"] else \
-                    ", the market has closed."
+                    ", the market is closed."
                 sym = str(r.get("symbol") or "").upper()
                 if sym:
                     msg += (" If %s is still open, close it: trader-broker flatten --symbol %s builds the sell "
-                            "ticket, then trader-risk and your yes." % (sym, sym))
+                            "ticket, then trader-risk and your yes. %s." % (sym, sym, SQUARE_OFF))
                 rings.append({"id": rid, "symbol": sym, "message": msg})
                 rung[rid] = stamp
             continue
-        sym = r["symbol"].upper()
+        sym = nse_symbol(r["symbol"])
         q = quotes.get(sym)
         if not q:
             continue
@@ -471,8 +877,8 @@ def evaluate(rules, quotes, status, state, now_utc):
             if hit and rid not in rung:
                 word = "at or above" if typ == "above" else "at or below"
                 label = {"stop": "stop", "target": "target"}.get(r["type"], "alert level")
-                rings.append({"id": rid, "symbol": sym, "message": "%s %s $%.2f: %s your %s $%s%s."
-                              % (sym, "is" if status["open"] else "last", p, word, label, _n(r["price"]),
+                rings.append({"id": rid, "symbol": sym, "message": "%s %s %s: %s your %s %s%s."
+                              % (sym, "is" if status["open"] else "last", rs(p), word, label, inr(r["price"]),
                                  (" (" + r["note"] + ")") if r.get("note") else "")})
                 rung[rid] = stamp
             elif not hit and rid in rung and r.get("rearm"):
@@ -485,23 +891,24 @@ def evaluate(rules, quotes, status, state, now_utc):
             want = r.get("direction")
             hit = abs(move) >= r["pct"] and (not want or (want == "up") == (move > 0))
             if hit and not _rang_today(rung.get(rid), today):
-                rings.append({"id": rid, "symbol": sym, "message": "%s moved %+.2f%% to $%.2f (from $%.2f)."
-                              % (sym, move, p, float(ref))})
+                rings.append({"id": rid, "symbol": sym, "message": "%s moved %+.2f%% to %s (from %s)."
+                              % (sym, move, rs(p), rs(ref))})
                 rung[rid] = stamp
     state["last_check"] = stamp
     return rings, state
 
 
 def _n(x):
+    """370.04 -> "370.04", 54.0 -> "54": for rule ids."""
     x = float(x)
     return str(int(x)) if x == int(x) else "%.2f" % x
 
 
 def rules_from_plan(plan, cfg_flat_by=None):
-    """trader/plan.json -> a stop alert, a target alert and a flat-by-close time alert, for the plan's day."""
+    """trader/plan.json -> a stop alert, a target alert and a flat-by time alert, for the plan's day."""
     if not isinstance(plan, dict) or not plan.get("symbol"):
         raise AlertError("the plan has no symbol (run trader-exit first)")
-    sym = str(plan["symbol"]).upper()
+    sym = nse_symbol(plan["symbol"])
     out = []
     for key, typ, word in (("stop", "stop", "plan stop"), ("target", "target", "plan target")):
         v = plan.get(key)
@@ -510,11 +917,11 @@ def rules_from_plan(plan, cfg_flat_by=None):
         label = plan.get("%s_label" % key)
         out.append({"id": "%s-plan-%s" % (sym.lower(), key), "symbol": sym, "type": typ, "price": float(v),
                     "note": word + (": " + label if label else "")})
-    flat = plan.get("flat_by") or cfg_flat_by or "15:55"
+    flat = plan.get("flat_by") or cfg_flat_by or "15:05"
     if _hhmm(flat) is None:
-        raise AlertError("the plan's flat_by %r is not a time like 15:55" % flat)
+        raise AlertError("the plan's flat_by %r is not a time like 15:05" % flat)
     out.append({"id": "%s-flat-by" % sym.lower(), "symbol": sym, "type": "time", "at": flat,
-                "label": "flat by close", "before_close": True})
+                "label": "flat by close"})
     if plan.get("date"):
         for r in out:
             r["date"] = str(plan["date"])
@@ -542,46 +949,81 @@ def _dedupe(items):
     return out
 
 
+def _plain(text):
+    """An NSE symbol, or None for one that is not (its error is printed already)."""
+    try:
+        return nse_symbol(text)
+    except AlertError:
+        return None
+
+
 def cmd_clock(a):
     st = market_status(parse_now(a.now))
     if a.json:
         print(json.dumps(st, indent=2))
     else:
-        print("New York %s (%s): NYSE %s, %s." % (st["now_new_york"], st["weekday"],
+        print("India %s IST (%s): NSE %s, %s." % (st["now_ist"], st["weekday"],
                                                   "OPEN" if st["open"] else "closed", st["reason"]))
         if st.get("opens"):
             print("Today's session: %s to %s%s." % (st["opens"], st["closes"],
-                                                    (" (early close: %s)" % st["early_close"]) if st.get("early_close") else ""))
+                                                    (" (%s)" % st["special_session"]) if st.get("special_session")
+                                                    else ""))
+        if st.get("auction"):
+            print("Closing auction: %s." % st["auction"])
         if not st["open"] and st.get("next_open"):
-            print("Next open: %s New York." % st["next_open"])
+            print("Next open: %s IST%s." % (st["next_open"], (" (%s)" % st["next_open_session"])
+                                            if st.get("next_open_session") else ""))
         if not st["calendar_known"]:
-            print("Holiday list covers %s only: check nyse.com for this date." % " and ".join(map(str, CALENDAR_YEARS)))
+            print("Holiday list covers %s only: check nseindia.com for this date."
+                  % " and ".join(map(str, CALENDAR_YEARS)))
     return 0 if st["open"] else 1
 
 
 def cmd_quote(a):
+    now = parse_now(a.now)
+    if a.set:
+        source = a.source or "manual"
+        if source not in ("kite", "manual"):
+            raise AlertError("--set stores a price you read elsewhere: --source kite (Kite's get_ltp) or manual")
+        quotes = parse_set(a.set, source, now)
+        path = a.write or "trader/prices.json"
+        write_prices(path, quotes, now, source)
+        for s, q in quotes.items():
+            print("%-10s %s  %s  [%s]" % (s, rs(q["price"]), q["time"], source))
+        print("Wrote %d price(s) to %s." % (len(quotes), path))
+        return 0
+    if a.source == "manual":
+        raise AlertError("--source manual goes with --set SYMBOL=PRICE (a price you read elsewhere)")
     syms = _dedupe([s.upper() for s in a.symbols] + (holdings(a) if a.holdings else []))
     if not syms:
-        raise AlertError("which tickers? alerts.py quote TSLA KO, or --holdings")
-    now = parse_now(a.now)
-    quotes, errors = get_quotes(syms, a.source, a.offline)
+        raise AlertError("which symbols? alerts.py quote RELIANCE TCS, or --holdings")
+    source, sess, note = source_for(a, now)
+    quotes, errors = get_quotes(syms, a.offline, source=source, sess=sess)
     if a.write and quotes:
-        write_prices(a.write, quotes, now, a.source)
+        write_prices(a.write, quotes, now, source)
     if a.json:
-        print(json.dumps({"quotes": quotes, "errors": errors}, indent=2))
+        print(json.dumps({"source": source, "quotes": quotes, "errors": errors}, indent=2))
     else:
-        for s in syms:
+        if note:
+            print("note: " + note)
+        for s in _dedupe([_plain(x) for x in syms]):
             q = quotes.get(s)
             if q:
                 chg = ""
                 if q.get("prev_close"):
-                    chg = " (%+.2f%% vs prev close $%.2f)" % (100.0 * (q["price"] / q["prev_close"] - 1), q["prev_close"])
-                print("%-6s $%.2f%s  %s  [%s]" % (s, q["price"], chg, q.get("time", ""), q["source"]))
+                    chg = " (%+.2f%% vs prev close %s)" % (100.0 * (q["price"] / q["prev_close"] - 1),
+                                                           rs(q["prev_close"]))
+                print("%-10s %s%s  %s  [%s]" % (s, rs(q["price"]), chg, q.get("time", ""), q["source"]))
         for e in errors:
             print("error: " + e)
         if a.write and quotes:
             print("Wrote %d price(s) to %s." % (len(quotes), a.write))
-        print("Quotes are free, delayed and unofficial: for alerts only. Your broker's price is the one that fills.")
+        if source == "kite":
+            print("Quotes from Kite, live as of each time shown: for alerts and sizing checks. Your fill is the "
+                  "price that counts.")
+        else:
+            print("Quotes are free, delayed and unofficial: for alerts only. Your broker's price is the one that "
+                  "fills.")
     return 0 if quotes else 1
 
 
@@ -594,31 +1036,36 @@ def cmd_check(a):
     status = market_status(now)
     watched = [r for r in rules if active(r, status["date"])]
     syms = _dedupe([str(r.get("symbol", "")).upper() for r in watched if r.get("type") not in NO_QUOTE])
-    quotes, errors = (get_quotes(syms, a.source, a.offline) if syms else ({}, []))
+    source, sess, note = source_for(a, now) if syms else ("yahoo", None, "")
+    quotes, errors = (get_quotes(syms, a.offline, source=source, sess=sess) if syms else ({}, []))
     state = _read(a.state, {})
     rings, state = evaluate(rules, quotes, status, state, now)
     if not a.no_write:
         _write(a.state, state)
         if quotes:
-            write_prices(a.prices_out, quotes, now, a.source)
+            write_prices(a.prices_out, quotes, now, source)
     if a.json:
-        print(json.dumps({"market": status, "rings": rings, "errors": errors,
+        print(json.dumps({"market": status, "rings": rings, "errors": errors, "source": source if syms else None,
                           "quotes": {s: q["price"] for s, q in quotes.items()}}, indent=2))
     else:
-        print("NYSE %s (%s New York, %s)." % ("OPEN" if status["open"] else "closed", status["now_new_york"],
-                                              status["reason"]))
+        print("NSE %s (%s IST, %s)." % ("OPEN" if status["open"] else "closed", status["now_ist"], status["reason"]))
+        if syms:
+            print("Prices: %s." % SOURCE_WORDS["offline" if a.offline else source])
+        if note:
+            print("note: " + note)
         for r in rings:
             print("ALERT " + r["message"])
         if not rings:
             print("Nothing hit. %d rule(s) watched today%s." % (
-                len(watched), (", " + ", ".join("%s $%.2f" % (s, quotes[s]["price"]) for s in syms if s in quotes))
+                len(watched), (", " + ", ".join("%s %s" % (s, rs(quotes[s]["price"])) for s in syms if s in quotes))
                 if quotes else ""))
         for e in errors:
             print("error: " + e)
         if rings:
-            print("An alert is information, not an order. A bracket's stop-loss and take-profit already sit at "
-                  "the broker: check get_open_position and record any fill (ticket.py fill). To close a "
-                  "position yourself: ticket.py flatten, then trader-risk and your yes.")
+            print("An alert is information, not an order. The stop-loss order sits at Zerodha once the entry "
+                  "fills; the target does not: when it rings, getting out is your call. Check get_positions "
+                  "and get_orders and record any fill (ticket.py fill). To close a position: ticket.py "
+                  "flatten, then trader-risk and your yes.")
     return 0 if rings else 1
 
 
@@ -642,23 +1089,22 @@ def cmd_add(a):
         for r in new:
             print("Added %s: %s" % (r["id"], json.dumps(r)))
         print("Run alerts.py check every few minutes while the trade is open (a scheduled task or /loop). "
-              "Free quotes are delayed; the broker's bracket orders are what actually stop you out.")
+              "Free quotes are delayed. The stop-loss order at Zerodha is what actually stops you out; "
+              "the target is watched here only, it is not an order.")
         return 0
     if a.opening_bell:
         rule = {"id": a.id or "opening-bell", "type": "opening_bell"}
     elif a.at:
         if _hhmm(a.at) is None:
-            raise AlertError("--at wants a New York time like 15:55")
+            raise AlertError("--at wants an India time like 15:05")
         rule = {"id": a.id or ("time-%s" % a.at.replace(":", "")), "type": "time", "at": a.at,
                 "label": a.label or "time alert"}
         if a.symbol:
-            rule["symbol"] = a.symbol.upper()
-        if a.before_close:
-            rule["before_close"] = True
+            rule["symbol"] = nse_symbol(a.symbol)
     else:
         if not a.symbol:
             raise AlertError("--symbol is required (or --from-plan, --at, --opening-bell)")
-        sym = a.symbol.upper()
+        sym = nse_symbol(a.symbol)
         if a.above is not None:
             rule = {"type": "above", "price": a.above}
         elif a.below is not None:
@@ -716,28 +1162,35 @@ def cmd_reset(a):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Price alerts and the NYSE clock (trader-alerts).")
+    ap = argparse.ArgumentParser(description="Price alerts and the NSE clock (trader-alerts).")
     sub = ap.add_subparsers(dest="cmd")
 
     def net(p):
-        p.add_argument("--source", default="yahoo", choices=["yahoo", "stooq"])
-        p.add_argument("--offline", metavar="DIR", help="read <source>-<TICKER>.json|csv files, no network")
-        p.add_argument("--now", help="pretend it is this time (no offset = New York time)")
+        p.add_argument("--offline", metavar="DIR", help="read yahoo-<SYMBOL>.json files, no network")
+        p.add_argument("--now", help="pretend it is this time (no offset = India time)")
+        p.add_argument("--config", default="trader/config.json", help="its data_source picks the quotes")
         p.add_argument("--json", action="store_true")
 
-    p = sub.add_parser("clock", help="is the NYSE open?")
+    p = sub.add_parser("clock", help="is the NSE open?")
     p.add_argument("--now")
     p.add_argument("--json", action="store_true")
-    p = sub.add_parser("quote", help="latest delayed quotes")
+    p = sub.add_parser("quote", help="latest quotes (Kite live, or Yahoo delayed), or store a price")
     net(p)
     p.add_argument("symbols", nargs="*")
-    p.add_argument("--holdings", action="store_true", help="add tickers from your portfolio and plan")
+    p.add_argument("--source", choices=["auto", "kite", "yahoo", "manual"],
+                   help="where quotes come from: auto (the default: Kite with today's session, else Yahoo), "
+                        "kite or yahoo; with --set, where the price was read: kite or manual")
+    p.add_argument("--set", action="append", metavar="SYMBOL=PRICE",
+                   help="store a price read elsewhere (Kite get_ltp) in prices.json")
+    p.add_argument("--holdings", action="store_true", help="add symbols from your portfolio and plan")
     p.add_argument("--portfolio", default="trader/portfolio.json")
     p.add_argument("--plan", default="trader/plan.json")
     p.add_argument("--write", nargs="?", const="trader/prices.json", metavar="PATH",
                    help="save to prices.json (default trader/prices.json)")
     p = sub.add_parser("check", help="check every rule, ring what hit")
     net(p)
+    p.add_argument("--source", choices=["auto", "kite", "yahoo"],
+                   help="auto (the default: Kite with today's session, else Yahoo), kite or yahoo")
     p.add_argument("--rules", default="trader/alerts.json")
     p.add_argument("--state", default="trader/state/alerts.json")
     p.add_argument("--prices-out", default="trader/prices.json")
@@ -753,14 +1206,12 @@ def main(argv=None):
     g.add_argument("--target", type=float)
     g.add_argument("--pct", type=float)
     g.add_argument("--opening-bell", action="store_true")
-    g.add_argument("--at", metavar="HH:MM", help="a time alert, New York time")
-    g.add_argument("--from-plan", action="store_true", help="stop, target and flat-by-close from the plan")
+    g.add_argument("--at", metavar="HH:MM", help="a time alert, India time")
+    g.add_argument("--from-plan", action="store_true", help="stop, target and flat-by time from the plan")
     p.add_argument("--plan", default="trader/plan.json")
     p.add_argument("--config", default="trader/config.json", help="flat_by when the plan has none")
     p.add_argument("--label", help="what a time alert says, e.g. \"flat by close\"")
-    p.add_argument("--before-close", action="store_true",
-                   help="a time alert that moves 3 hours earlier on a 1:00 p.m. early close")
-    p.add_argument("--date", help="watch this rule on this New York date only (YYYY-MM-DD)")
+    p.add_argument("--date", help="watch this rule on this India date only (YYYY-MM-DD)")
     p.add_argument("--direction", choices=["up", "down"])
     p.add_argument("--rearm", action="store_true")
     p.add_argument("--note")

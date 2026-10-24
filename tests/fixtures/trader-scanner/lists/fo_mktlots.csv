@@ -1,0 +1,11 @@
+UNDERLYING                                        ,SYMBOL    ,OCT-26    ,NOV-26    ,DEC-26    
+NIFTY 50                                          ,NIFTY     ,75        ,75        ,75        
+NIFTY BANK                                        ,BANKNIFTY ,35        ,35        ,35        
+NIFTY FINANCIAL SERVICES                          ,FINNIFTY  ,65        ,65        ,65        
+NIFTY MIDCAP SELECT                               ,MIDCPNIFTY,140       ,140       ,140       
+NIFTY NEXT 50                                     ,NIFTYNXT50,25        ,25        ,25        
+Derivatives on Individual Securities              ,Symbol    ,          ,          ,          
+DEMO INDUSTRIES LTD (SYNTHETIC)                   ,DEMO      ,550       ,550       ,550       
+SYN & SONS LTD (SYNTHETIC)                        ,SYN&SONS  ,1200      ,1200      ,1200      
+SYN-AUTO LTD (SYNTHETIC)                          ,SYN-AUTO  ,300       ,300       ,300       
+SYNA LTD (SYNTHETIC)                              ,SYNA      ,2000      ,2000      ,2000      
