@@ -460,7 +460,7 @@ class Kite(unittest.TestCase):
         self.assertEqual(code, 0, err)
         notes = [l for l in out.splitlines() if "Kite refused" in l]
         self.assertEqual(notes, ["note: prices: Kite refused the session (TokenException: Incorrect `api_key` or "
-                                 "`access_token`.). Log in again: python3 trader-broker/kite.py login"])
+                                 "`access_token`.). Log in again with /trader-broker (kite.py login)"])
         self.assertNotIn("vs the previous close", out)
         self.assertIn("2026-10-19 08:04 IST  DEMO", out)
 
@@ -475,7 +475,7 @@ class Kite(unittest.TestCase):
         self.assertEqual(self.fake.requests, [])
         code, _, err = run(self.base + ["--source", "kite"])
         self.assertEqual(code, 2)
-        self.assertIn("no Kite session for today: log in first (python3 trader-broker/kite.py login)", err)
+        self.assertIn("no Kite session for today: log in first with /trader-broker (kite.py login)", err)
 
     def test_an_expired_session_and_the_config(self):
         FakeKite.session_file(self.tmp, login_ist=datetime.datetime(2026, 10, 18, 9, 0))   # ended 06:00 on the 19th

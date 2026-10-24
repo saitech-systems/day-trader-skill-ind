@@ -4,18 +4,16 @@ description: >-
   Price Alerts. Rings when a price, a stop or the opening bell hits on the
   NSE. Turns the trade plan into three alerts in one go (the stop, the target
   and "flat by close" at your flat-by time, 15:05 by default, before
-  Zerodha's own MIS square-off), plus above / below / stop / target levels,
-  percent moves from the previous close, any time of day, and the NSE opening
-  bell at 9:15, each ringing once so you are not spammed. Knows NSE hours in
-  India time with the 2026 holidays, the Budget-day Sunday, Muhurat trading
-  and the closing auction, reads live quotes from your own Kite Connect API
-  (read only, one request for every symbol) or free delayed ones from Yahoo
-  (SYMBOL.NS), stores a Kite get_ltp price when you have one, and writes
-  trader/prices.json for sizing and the risk check. Use when the user
-  says "alert me when", "tell me if RELIANCE hits 1,400", "watch my stop",
-  "watch my trade", "remind me to square off by 3:05", "is the market open",
-  "is NSE open today", "is it a holiday", "when does the market open", "get
-  me a price", or right after /trader-exit writes a plan.
+  Zerodha's own MIS square-off), plus above / below levels, percent moves
+  from the previous close, any time of day and the 9:15 opening bell, each
+  ringing once. Knows NSE hours in India time with the 2026 holidays, the
+  Budget-day Sunday, Muhurat trading and the closing auction, reads live
+  quotes from your own Kite Connect API (read only) or free delayed ones from
+  Yahoo, and writes trader/prices.json for sizing and the risk check. Use
+  when the user says "alert me when", "tell me if RELIANCE hits 1,400",
+  "watch my stop", "watch my trade", "remind me to square off by 3:05", "is
+  the market open", "is NSE open today", "is it a holiday", "when does the
+  market open", "get me a price", or right after /trader-exit writes a plan.
 argument-hint: "[NSE symbol] [price]"
 ---
 

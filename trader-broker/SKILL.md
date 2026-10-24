@@ -3,23 +3,18 @@ name: trader-broker
 description: >-
   Order Executor. Takes approved NSE orders to Zerodha, paper trading by
   default, never without your yes. Shows each order as a plain ticket (the
-  LIMIT buy, its SL stop-loss sell placed only after the buy fills, the target
-  that is watched and not sent, and the max loss at the stop with charges)
-  plus the exact order field by field, and records your yes word for word.
-  Live, you place that exact order yourself in Kite (the default), and the
-  pack reads it back from Kite's order book with your own Kite Connect API
-  key, read only: a daily Kite login, live quotes and candles, margins,
-  positions, the order book and trades, and a sync of your portfolio. It never
-  places, changes or cancels an order through the API. Optionally Claude places
-  orders through Zerodha's Kite MCP server behind its Allow once card. In paper
-  mode nothing reaches Zerodha. Builds the sell ticket that closes a day trade
-  by your flat-by time (cancel the stop-loss first), records fills, and logs
-  each trade's max loss so trader-risk can hold the daily limit. Use when the
-  user says "place the order", "buy it", "execute", "send it to Zerodha",
-  "log in to Kite", "Kite login", "connect my Kite API", "did my order fill",
-  "match my order", "sync my positions", "what are my margins", "close my
-  position", "square off", "flatten", "get me out", "set up paper trading",
-  or after /trader-risk passes.
+  LIMIT buy, its SL stop-loss placed only after the buy fills, the target
+  that is watched, the max loss with charges) and records your yes word for
+  word. Live, you place that exact order yourself in Kite, and the pack reads
+  it back with your own Kite Connect API key, read only: a daily Kite login,
+  quotes, margins, positions, the order book and a portfolio sync. It never
+  places, changes or cancels an order through the API (an optional Kite MCP
+  route puts Claude's Allow once card first). Builds the ticket that closes a
+  day trade by your flat-by time and logs each trade's max loss for
+  trader-risk. Use when the user says "place the order", "buy it", "log in
+  to Kite", "connect my Kite API", "did my order fill", "match my order",
+  "sync my positions", "what are my margins", "square off", "get me out",
+  "set up paper trading", or after /trader-risk passes.
 argument-hint: "[order number]"
 ---
 
@@ -129,7 +124,7 @@ order with it.
    - Kite sends the browser to the redirect URL with
      `?request_token=...&action=login&status=success`. The page may not load;
      the user copies the whole address.
-   - **The user runs** `python3 trader-broker/kite.py session --url "<that
+   - **The user runs** `python3 "${CLAUDE_SKILL_DIR}/kite.py" session --url "<that
      address>"` themselves (in Claude Code, after a `!`, so it runs in their
      shell). The request token works once, for a few minutes, and is useless
      without the secret. The tool exchanges it (the one request in the pack
@@ -287,7 +282,8 @@ sent to Zerodha)" and nothing reaches Kite.
 - Never places orders from a scheduled or background task: nobody is there to say yes.
 - Never calls a Kite order tool on a paper account, and never matches a paper order to Zerodha.
 - Never asks for, reads, stores or repeats API keys, secrets, passwords, TOTP codes, access tokens or
-  request tokens; the session file is written by the user's own `kite.py session` run.
+  request tokens; the session file is written by the user's own `kite.py session` run. Never opens
+  `trader/state/kite-session.json` and never prints the environment (`env`, `echo $KITE_API_SECRET`).
 - Never switches `"paper"` to false. The user does that themselves.
 - Never uses GTT, F&O, MTF, cover orders or AMO on its own.
 - Never promises a fill price: a LIMIT may not fill, and an SL stop can fill worse or not at all.

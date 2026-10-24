@@ -73,6 +73,20 @@ class Repo(unittest.TestCase):
             self.assertGreater(len(fm), 200, "%s description is too thin" % s)
             self.assertGreater(len(text.splitlines()), 60, s)
 
+    def test_frontmatter_fits_the_agent_skills_limits(self):
+        # claude.ai refuses a skill whose name is not lowercase-hyphen (64 max) or whose
+        # description runs past 1,024 characters
+        for s in SKILLS:
+            fm, _ = frontmatter(os.path.join(ROOT, s, "SKILL.md"))
+            self.assertRegex(s, r"^[a-z0-9]+(-[a-z0-9]+)*$")
+            self.assertLessEqual(len(s), 64)
+            m = re.search(r"(?m)^description: >-\n((?:  .*\n?)+)", fm + "\n")
+            self.assertIsNotNone(m, "%s: description should be a folded block" % s)
+            desc = " ".join(line.strip() for line in m.group(1).splitlines() if line.strip())
+            self.assertLessEqual(len(desc), 1024, "%s description is %d characters" % (s, len(desc)))
+            self.assertNotIn("<", desc, s)
+            self.assertNotIn(">", desc, s)
+
     def test_order_path_skills_carry_the_safety_rule(self):
         for s in ORDER_PATH:
             _, text = frontmatter(os.path.join(ROOT, s, "SKILL.md"))

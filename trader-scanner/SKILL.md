@@ -58,7 +58,7 @@ when it found nothing or could not run (the reason is one plain line).
 | `trader/universe.txt` | written by `universe`: one `SYMBOL\|Name` a line, read by `daily` and `orb` |
 | `trader/watchlist.json` | written by `daily` and `orb`: `mode`, `as_of`, `universe`, `scanned`, `failed`, `exchange`, `hits[]`. trader-news and trader-entry read `hits[].symbol` (plain NSE symbols) |
 | `trader/config.json` | read by `orb`: `no_entries_after` (default 14:45); by both: `data_source` (auto) |
-| `trader/state/kite-session.json` | your Kite session, written by `trader-broker/kite.py login`; read, never written here |
+| `trader/state/kite-session.json` | your Kite session, written by /trader-broker (`kite.py session`); read, never written here |
 
 ## The universe
 
@@ -141,7 +141,7 @@ auction; the default cutoff is well before that.
 ## Data source
 
 `--source auto` (the default, or `"data_source"` in `trader/config.json`)
-reads your own Kite Connect session when `trader-broker/kite.py` logged in
+reads your own Kite Connect session when /trader-broker (`kite.py`) logged in
 today (the Connect plan carries the market data), else free Yahoo data with a
 one-line note; `--source kite` insists, `--source yahoo` never asks Kite. Kite
 is read only here: quotes and candles, never an order. `daily` asks one

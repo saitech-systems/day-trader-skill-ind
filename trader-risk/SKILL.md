@@ -4,20 +4,17 @@ description: >-
   Risk Manager. Checks every NSE trade against your limits and stops anything
   over them, before it can reach Zerodha. For a day trade: a stop is required
   (the SL stop-loss order), the loss at the stop plus Zerodha's intraday
-  charges must fit your max loss per trade (measured from the limit price, or
-  the higher of the plan's entry and a fresh price for a MARKET buy),
-  reward:risk must meet your minimum, the day's total risk must fit your daily
-  loss limit, no more than your trades per day, and no new entries outside
-  your entry window in India time or when the NSE is closed. It also keeps the
-  basics: blocked symbols, order size, position cap, cash buffer, MIS
-  leverage, short sales, F&O, BSE, Kite place_order format (numbers, regular
-  orders, MIS, prices on the NSE tick grid) and a stop-loss that matches its
-  entry, duplicates and a daily order limit. Getting out is never blocked by
-  a day limit. Prints PASS or BLOCK with the reason and records the verdicts
-  so trader-broker only shows an order that passed. Use when the user says
-  "check my order", "is this safe", "risk check", "does this break my rules",
-  "can I take this trade", "how much have I risked today", or before
-  /trader-broker, always.
+  charges must fit your max loss per trade, reward:risk must meet your
+  minimum, the day's risk must fit your daily loss limit, no more than your
+  trades per day, and no new entries outside your entry window in India time
+  or when the NSE is closed. It also checks blocked symbols, order size,
+  position cap, cash buffer, MIS leverage, short sales, F&O, BSE, the Kite
+  order format and the NSE tick grid, duplicates and a daily order limit.
+  Getting out is never blocked by a day limit. Prints PASS or BLOCK with the
+  reason and records the verdicts so trader-broker only shows an order that
+  passed. Use when the user says "check my order", "is this safe", "risk
+  check", "does this break my rules", "can I take this trade", "how much
+  have I risked today", or before /trader-broker, always.
 argument-hint: "[path to orders.json]"
 ---
 

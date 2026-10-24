@@ -307,7 +307,10 @@ def kite_request(sess, path, params=None, timeout=20):
         "Authorization": "token %s:%s" % (sess["api_key"], sess["access_token"])})
     try:
         with kite_urlopen(req, timeout) as r:
-            return r.read().decode("utf-8", "replace")
+            body = r.read()
+        if body[:2] == b"\x1f\x8b":         # a gzipped answer (the instrument dump can come that way)
+            body = gzip.decompress(body)
+        return body.decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         try:
             doc = json.loads(e.read().decode("utf-8", "replace"))
@@ -317,7 +320,7 @@ def kite_request(sess, path, params=None, timeout=20):
         finally:
             e.close()
         if e.code in (401, 403):
-            raise KiteError("Kite refused the session (%s). Log in again: python3 trader-broker/kite.py login" % why)
+            raise KiteError("Kite refused the session (%s). Log in again with /trader-broker (kite.py login)" % why)
         if e.code == 429:
             raise KiteError("Kite says too many requests (%s): wait a few seconds and try again" % why)
         raise KiteError("Kite answered HTTP %d for %s (%s)" % (e.code, path, why))
@@ -465,9 +468,9 @@ def pick_source(choice=None, cfg=None, now_utc=None, path=KITE_SESSION):
     if sess:
         return "kite", sess, ""
     if want == "kite":
-        raise KiteError("no Kite session for today: log in first (python3 trader-broker/kite.py login), "
+        raise KiteError("no Kite session for today: log in first with /trader-broker (kite.py login), "
                         "or use --source yahoo")
-    return "yahoo", None, "no Kite session today, so free Yahoo data (log in with trader-broker/kite.py for live Kite data)"
+    return "yahoo", None, "no Kite session today, so free Yahoo data (log in with /trader-broker for live Kite data)"
 # END KITE BLOCK
 
 
@@ -554,6 +557,22 @@ def write_private(path, doc):
         os.chmod(path, 0o600)
     except OSError:
         pass
+
+
+def guard_from_git(path):
+    """Put a .gitignore that ignores everything next to the session file, so git
+    never picks up the token in whatever project the pack runs in. Returns the
+    .gitignore's path when it wrote one."""
+    d = os.path.dirname(os.path.abspath(path))
+    gi = os.path.join(d, ".gitignore")
+    if os.path.exists(gi):
+        return None
+    try:
+        with open(gi, "w", encoding="utf-8") as fh:
+            fh.write("# written by trader-broker/kite.py: the Kite session in this folder must never be committed\n*\n")
+    except OSError:
+        return None
+    return gi
 
 
 def saved_session(path):
@@ -659,7 +678,7 @@ def cmd_login(a):
     print("     ?request_token=...&action=login&status=success")
     print("   The page itself may not load. That is fine: copy the whole address.")
     print("3. Run this yourself (in Claude Code, after a !), with that address in the quotes:")
-    print('     python3 trader-broker/kite.py session --url "PASTE-THE-ADDRESS-HERE"')
+    print('     python3 "%s" session --url "PASTE-THE-ADDRESS-HERE"' % os.path.abspath(__file__))
     print("The request token in it works once, for a few minutes, and is useless without your API secret,")
     print("which stays in KITE_API_SECRET. Never paste the secret anywhere.")
     return 0
@@ -676,9 +695,12 @@ def cmd_session(a):
     doc = {"api_key": key, "access_token": data["access_token"], "user_id": data.get("user_id") or "",
            "user_name": data.get("user_name") or "", "login_utc": iso_z(login)}
     write_private(a.session, doc)
+    guard = guard_from_git(a.session)
     print("Logged in to Kite as %s (%s) until %s." % (doc["user_name"] or "you", doc["user_id"] or "?",
                                                      until_words(kite_expiry(login))))
-    print("Saved the session to %s (only you can read it). Keep trader/ out of git: add it to .gitignore." % a.session)
+    print("Saved the session to %s (only you can read it)." % a.session)
+    if guard:
+        print("Wrote %s so git ignores that folder; add trader/ to your project's .gitignore as well." % guard)
     print("The data tools now read live Kite data (\"data_source\": \"auto\"). Nothing here can place an order.")
     return 0
 

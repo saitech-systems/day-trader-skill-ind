@@ -97,7 +97,7 @@ class Login(Base):
         self.assertEqual(code, 0)
         self.assertIn("     https://kite.zerodha.com/connect/login?v=3&api_key=demo_api_key\n", text)
         self.assertIn("?request_token=...&action=login&status=success", text)
-        self.assertIn('python3 trader-broker/kite.py session --url "PASTE-THE-ADDRESS-HERE"', text)
+        self.assertIn('kite.py" session --url "PASTE-THE-ADDRESS-HERE"', text)
         self.assertIn("(in Claude Code, after a !)", text)
         self.assertIn("Never paste the secret anywhere", text)
         self.assertEqual(self.fake.requests, [])
@@ -119,9 +119,12 @@ class Login(Base):
         self.assertEqual((code, err), (0, ""))
         self.assertIn("Logged in to Kite as Demo User (AB1234) until 06:00 IST on Tue 2026-10-20.", text)
         self.assertIn("only you can read it", text)
-        self.assertIn("Keep trader/ out of git", text)
+        self.assertIn("so git ignores that folder; add trader/ to your project's .gitignore as well", text)
         path = os.path.join("trader", "state", "kite-session.json")
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        # git never sees the folder that holds the token, whatever project this runs in
+        with open(os.path.join("trader", "state", ".gitignore")) as fh:
+            self.assertEqual(fh.read().splitlines()[-1], "*")
         with open(path) as fh:
             doc = json.load(fh)
         self.assertEqual(doc, {"api_key": "demo_api_key", "access_token": "demo_access_token", "user_id": "AB1234",
@@ -143,6 +146,9 @@ class Login(Base):
         for out in self.out:
             for s in SECRETS:
                 self.assertNotIn(s, out)
+        code, again, _ = self.run_kite("session", "--url", REDIRECT, "--now", "2026-10-19 08:59")
+        self.assertEqual(code, 0)
+        self.assertNotIn(".gitignore", again)     # written once, never overwritten
 
     def test_the_request_token_alone(self):
         code, text, _ = self.run_kite("session", "--request-token", REQUEST_TOKEN, "--now", "2026-10-19 08:58")
@@ -387,7 +393,7 @@ class Account(Base):
         code, _, err = self.run_kite("quote", "DEMO", "--now", "2026-10-19 10:05")
         self.assertEqual(code, 1)
         self.assertEqual(err, "kite.py: Kite refused the session (TokenException: Incorrect `api_key` or "
-                              "`access_token`.). Log in again: python3 trader-broker/kite.py login\n")
+                              "`access_token`.). Log in again with /trader-broker (kite.py login)\n")
         self.fake.fail["/orders"] = (429, os.path.join(BDIR, "error-429-synthetic.json"))
         code, _, err = self.run_kite("orders", "--now", "2026-10-19 10:05")
         self.assertEqual(code, 1)

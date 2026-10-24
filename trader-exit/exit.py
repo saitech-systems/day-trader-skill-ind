@@ -532,7 +532,10 @@ def kite_request(sess, path, params=None, timeout=20):
         "Authorization": "token %s:%s" % (sess["api_key"], sess["access_token"])})
     try:
         with kite_urlopen(req, timeout) as r:
-            return r.read().decode("utf-8", "replace")
+            body = r.read()
+        if body[:2] == b"\x1f\x8b":         # a gzipped answer (the instrument dump can come that way)
+            body = gzip.decompress(body)
+        return body.decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         try:
             doc = json.loads(e.read().decode("utf-8", "replace"))
@@ -542,7 +545,7 @@ def kite_request(sess, path, params=None, timeout=20):
         finally:
             e.close()
         if e.code in (401, 403):
-            raise PlanError("Kite refused the session (%s). Log in again: python3 trader-broker/kite.py login" % why)
+            raise PlanError("Kite refused the session (%s). Log in again with /trader-broker (kite.py login)" % why)
         if e.code == 429:
             raise PlanError("Kite says too many requests (%s): wait a few seconds and try again" % why)
         raise PlanError("Kite answered HTTP %d for %s (%s)" % (e.code, path, why))
@@ -690,9 +693,9 @@ def pick_source(choice=None, cfg=None, now_utc=None, path=KITE_SESSION):
     if sess:
         return "kite", sess, ""
     if want == "kite":
-        raise PlanError("no Kite session for today: log in first (python3 trader-broker/kite.py login), "
+        raise PlanError("no Kite session for today: log in first with /trader-broker (kite.py login), "
                         "or use --source yahoo")
-    return "yahoo", None, "no Kite session today, so free Yahoo data (log in with trader-broker/kite.py for live Kite data)"
+    return "yahoo", None, "no Kite session today, so free Yahoo data (log in with /trader-broker for live Kite data)"
 # END KITE BLOCK
 
 

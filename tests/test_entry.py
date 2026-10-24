@@ -782,7 +782,7 @@ class KiteSource(unittest.TestCase):
         code, text, err = self.check("--source", "kite")
         self.assertEqual(code, 1)
         self.assertEqual(len(err.strip().splitlines()), 1)
-        self.assertIn("entry.py: no Kite session for today: log in first (python3 trader-broker/kite.py login)", err)
+        self.assertIn("entry.py: no Kite session for today: log in first with /trader-broker (kite.py login)", err)
         self.assertEqual((self.fake.requests, self.yahoo), ([], []))
 
     def test_yahoo_by_choice_or_by_config(self):
@@ -811,7 +811,7 @@ class KiteSource(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(len(err.strip().splitlines()), 1, err)
         self.assertIn("entry.py: Kite refused the session (TokenException: Incorrect `api_key` or "
-                      "`access_token`.). Log in again: python3 trader-broker/kite.py login", err)
+                      "`access_token`.). Log in again with /trader-broker (kite.py login)", err)
         self.assertNotIn("Traceback", err)
         self.assertNotIn(self.TOKEN, err)
 

@@ -60,7 +60,7 @@ waiting.
 
 `--source auto` (the default, or `"data_source"` in `trader/config.json`)
 reads today's candles from the user's own Kite Connect app when they have logged in today
-(`python3 trader-broker/kite.py login`, then `kite.py session`; Zerodha ends
+(`/trader-broker`: `kite.py login`, then `kite.py session`; Zerodha ends
 every session at 6:00 AM), and from free Yahoo bars otherwise, saying so once.
 `--source kite` insists on Kite, `--source yahoo` skips it, `--offline` wins
 over both. Kite is read only here: it never places anything. The header says

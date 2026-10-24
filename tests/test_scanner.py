@@ -932,8 +932,8 @@ class KiteSource(unittest.TestCase):
         os.remove(os.path.join(self.d, "trader", "state", "kite-session.json"))
         code, _, err = run(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--source", "kite"])
         self.assertEqual(code, 1)
-        self.assertEqual(err.strip().splitlines(), ["scan.py: no Kite session for today: log in first (python3 "
-                                                    "trader-broker/kite.py login), or use --source yahoo"])
+        self.assertEqual(err.strip().splitlines(), ["scan.py: no Kite session for today: log in first with "
+                                                    "/trader-broker (kite.py login), or use --source yahoo"])
         FakeKite.session_file(self.d)
         refused = os.path.join(FIX, "shared", "kite", "error-token-synthetic.json")
         self.fake.fail["/quote"] = (403, refused)
@@ -942,7 +942,7 @@ class KiteSource(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(len(err.strip().splitlines()), 1)                 # --quiet: no progress lines
         self.assertIn("scan.py: Kite refused the session (TokenException: Incorrect `api_key` or `access_token`.)."
-                      " Log in again: python3 trader-broker/kite.py login", err)
+                      " Log in again with /trader-broker (kite.py login)", err)
         self.assertNotIn("Traceback", err)
         self.assertNotIn(TOKEN, text + err)
         self.assertFalse(os.path.exists(os.path.join(self.d, "wl.json")))

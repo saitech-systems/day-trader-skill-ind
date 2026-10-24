@@ -420,7 +420,7 @@ class KiteSource(unittest.TestCase):
         code, text, err = self.plan("--source", "kite")
         self.assertEqual(code, 1)
         self.assertEqual(err.strip(), "exit.py: no Kite session for today: log in first "
-                                      "(python3 trader-broker/kite.py login), or use --source yahoo")
+                                      "with /trader-broker (kite.py login), or use --source yahoo")
 
     def test_a_refused_session(self):
         self.login()

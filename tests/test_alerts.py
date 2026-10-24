@@ -661,7 +661,7 @@ class Kite(unittest.TestCase):
         lines = [l for l in out.splitlines() if "Kite" in l and "refused" in l]
         self.assertEqual(len(lines), 1)
         self.assertIn("Kite refused the session (TokenException: Incorrect `api_key` or `access_token`.). "
-                      "Log in again: python3 trader-broker/kite.py login", lines[0])
+                      "Log in again with /trader-broker (kite.py login)", lines[0])
         self.no_secrets(out, err)
         # the clock still rings while Kite refuses: flat by is a time, not a price
         rules = os.path.join(self.d, "alerts.json")
@@ -693,7 +693,7 @@ class Kite(unittest.TestCase):
         self.assertEqual((len(f.calls), self.fake.requests), (1, []))
         code, _, err = run(["quote", "DEMO", "--source", "kite", "--now", "2026-10-19 10:53"])
         self.assertEqual(code, 1)
-        self.assertIn("no Kite session for today: log in first (python3 trader-broker/kite.py login)", err)
+        self.assertIn("no Kite session for today: log in first with /trader-broker (kite.py login)", err)
 
     def test_offline_and_the_config_win(self):
         code, out, err = run(["quote", "DEMO", "--source", "kite", "--offline", QDIR, "--json"])
